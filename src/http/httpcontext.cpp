@@ -21,6 +21,7 @@
 #include <http/contextlist.h>
 #include <http/handlerfactory.h>
 #include <http/handlertype.h>
+#include <http/htaccessparser.h>
 #include <http/htauth.h>
 #include <http/httplog.h>
 #include <http/httpmime.h>
@@ -182,7 +183,16 @@ void HttpContext::releaseHTAConf()
             if (m_pInternal->m_pWebSockAddrStr)
                 free(m_pInternal->m_pWebSockAddrStr);
         }
-        releaseHTAuth();
+        // If auth was created from .htaccess, we own the UserDir too
+        if ((m_iConfigBits & BIT_HTA_OWNS_UDIR) && m_pInternal->m_pHTAuth)
+        {
+            UserDir *pUD = const_cast<UserDir *>(
+                m_pInternal->m_pHTAuth->getUserDir());
+            releaseHTAuth();
+            delete pUD;
+        }
+        else
+            releaseHTAuth();
         releaseAccessControl();
         releaseMIME();
         releaseDefaultCharset();
@@ -1344,6 +1354,74 @@ int HttpContext::configRewriteRule(const RewriteMapList *pMapList,
 }
 
 
+int HttpContext::htaccessConfigFull(const RewriteMapList *pMapList,
+                                    const char *htaccessPath)
+{
+    if (!htaccessPath || strlen(htaccessPath) < 2)
+        return 0;
+
+    char achHandler[MAX_LINE_LENGTH] = {0};
+    if (ConfigCtx::getCurConfigCtx()->expandVariable(htaccessPath, achHandler,
+                MAX_LINE_LENGTH, 1) < 0)
+    {
+        LS_ERROR(ConfigCtx::getCurConfigCtx(),
+                 "Failed to expand .htaccess path \"%s\".", htaccessPath);
+        return LS_FAIL;
+    }
+    htaccessPath = achHandler;
+
+    if (access(htaccessPath, F_OK) != 0)
+        return 0;
+
+    struct stat st;
+    if (stat(htaccessPath, &st) != 0)
+        return 0;
+
+    setLastMod(st.st_mtime);
+
+    // Read the file
+    FILE *fp = fopen(htaccessPath, "r");
+    if (!fp)
+    {
+        LS_WARN(ConfigCtx::getCurConfigCtx(),
+                "Cannot open .htaccess file: %s", htaccessPath);
+        return LS_FAIL;
+    }
+
+    fseek(fp, 0, SEEK_END);
+    long fileLen = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    if (fileLen <= 0 || fileLen > 1024 * 1024)
+    {
+        fclose(fp);
+        if (fileLen > 1024 * 1024)
+            LS_WARN("[.htaccess] File too large (>1MB), skipped: %s",
+                    htaccessPath);
+        return 0;
+    }
+
+    char *pBuf = new char[fileLen + 1];
+    if (!pBuf)
+    {
+        fclose(fp);
+        return LS_FAIL;
+    }
+
+    long bytesRead = fread(pBuf, 1, fileLen, fp);
+    fclose(fp);
+    pBuf[bytesRead] = 0;
+
+    LS_INFO("[.htaccess] Parsing full .htaccess: %s (%ld bytes)",
+            htaccessPath, bytesRead);
+
+    int ret = HtAccessParser::parse(pBuf, bytesRead, this, pMapList);
+
+    delete[] pBuf;
+    return ret;
+}
+
+
 int HttpContext::configMime(const XmlNode *pContextNode)
 {
     const char *pValue = pContextNode->getChildValue("addMIMEType");
@@ -1551,7 +1629,16 @@ int HttpContext::config(const RewriteMapList *pMapList,
         htaccessPath.setStr(getLocation(), getLocationLen());
         htaccessPath.append(".htaccess", 9);
     }
-    configRewriteRule(pMapList, (char *) rules, htaccessPath.c_str());
+
+    if (autoLoadHt && htaccessPath.c_str()
+        && strlen(htaccessPath.c_str()) > 1)
+    {
+        // Full .htaccess parsing: handles all Apache directives
+        configRewriteRule(pMapList, (char *) rules, "");
+        htaccessConfigFull(pMapList, htaccessPath.c_str());
+    }
+    else
+        configRewriteRule(pMapList, (char *) rules, htaccessPath.c_str());
 
     pNode = pContextNode->getChild("customErrorPages", 1);
     if (pNode)

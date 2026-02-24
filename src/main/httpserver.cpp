@@ -215,10 +215,12 @@ void HttpServer::cleanPid()
 
 LS_SINGLETON(HttpServer);
 
+static HttpServerImpl *s_pHttpServerImpl = NULL;
 
 class HttpServerImpl
 {
     friend class HttpServer;
+    friend void recycleContext(HttpContext *pContext);
 
 private:
 
@@ -254,6 +256,7 @@ private:
         , m_pri_gid(0)
         , m_pQuicEngine(NULL)
     {
+        s_pHttpServerImpl = this;
         ClientCache::initObjPool();
         ExtAppRegistry::init();
         HttpMime::setMime(&m_httpMime);
@@ -5722,6 +5725,17 @@ int HttpServer::test_main(const char *pArgv0)
     return 0;
 }
 #endif
+
+
+// Free-function declared in httpcontext.h — delegates to HttpServerImpl's
+// deferred-delete list so old contexts survive for connTimeout seconds.
+void recycleContext(HttpContext *pContext)
+{
+    if (s_pHttpServerImpl)
+        s_pHttpServerImpl->recycleContext(pContext);
+    else
+        delete pContext;
+}
 
 
 /////////////////////////////////////////////////////////////////

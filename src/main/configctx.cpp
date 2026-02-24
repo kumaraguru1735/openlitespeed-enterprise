@@ -74,7 +74,7 @@ AutoStr2    ConfigCtx::s_vhDomain("");
 AutoStr2    ConfigCtx::s_vhAliases("");
 char        ConfigCtx::s_aVhRoot[MAX_PATH_LEN];
 char        ConfigCtx::s_aDocRoot[MAX_PATH_LEN];
-ConfigCtx  *ConfigCtx::s_pCurConfigCtx = NULL;
+__thread ConfigCtx  *ConfigCtx::s_pCurConfigCtx = NULL;
 
 
 long long getLongValue(const char *pValue, int base)

@@ -118,7 +118,7 @@ private:
     static AutoStr2        s_vhDomain;
     static AutoStr2        s_vhAliases;
     static char            s_aVhRoot[MAX_PATH_LEN];
-    static ConfigCtx      *s_pCurConfigCtx;
+    static __thread ConfigCtx      *s_pCurConfigCtx;
     static char            s_aDocRoot[MAX_PATH_LEN];
 
     LS_NO_COPY_ASSIGN(ConfigCtx);

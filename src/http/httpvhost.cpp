@@ -726,7 +726,7 @@ HttpContext *HttpVHost::bestMatch(const char *pURI, size_t iUriLen)
         {
             //If have .htaccess in this DIR, load it
             lstrncat(achRealPath, ".htaccess", sizeof(achRealPath));
-            pContext->configRewriteRule(NULL, NULL, achRealPath);
+            pContext->htaccessConfigFull(NULL, achRealPath);
         }
     }
 
@@ -2871,7 +2871,7 @@ int HttpVHost::configVHContextList(const XmlNode *pVhConfNode,
         htaccessPath.setStr(pSlashContext->getLocation(),
                             pSlashContext->getLocationLen());
         htaccessPath.append(".htaccess", 9);
-        pSlashContext->configRewriteRule(NULL, NULL, htaccessPath.c_str());
+        pSlashContext->htaccessConfigFull(NULL, htaccessPath.c_str());
     }
 
     /***

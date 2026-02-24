@@ -288,7 +288,11 @@ int RewriteEngine::parseRules(char *&pRules, RewriteRuleList *pRuleList,
                     LS_ERROR("Invalid value of RewriteEngine: %.*s", len, pRules);
             }
             else if (*pRules != '#')
-                LS_INFO("Invalid rewrite directive: %s", pRules);
+            {
+                // Non-rewrite directives are now handled by HtAccessParser
+                // Only log at debug level to avoid noise
+                LS_DBG("Non-rewrite directive in rewrite context: %s", pRules);
+            }
 
             if (pLineEnd)
                 *pLineEnd = '\n';

@@ -19,6 +19,7 @@
 #define CONTEXTNODE_H
 
 #include <util/hashstringmap.h>
+#include <lsr/ls_atomic.h>
 
 #define HTA_UNKNOWN         0
 #define HTA_NONE            1
@@ -61,8 +62,18 @@ public:
 
     ContextNode(const char *pchLabel, ContextNode *pParentNode);
 
-    const HttpContext *getContext() const   {   return m_pContext ;     }
-    HttpContext *getContext()               {   return m_pContext ;     }
+    const HttpContext *getContext() const
+    {
+        HttpContext *p;
+        ls_atomic_load(p, const_cast<HttpContext **>(&m_pContext));
+        return p;
+    }
+    HttpContext *getContext()
+    {
+        HttpContext *p;
+        ls_atomic_load(p, &m_pContext);
+        return p;
+    }
     ContextNode *getParentNode() const      {   return m_pParentNode ;  }
     ChildNodeList *getChildren() const      {   return m_pChildren;     }
     HttpContext *getParentContext();
@@ -85,7 +96,19 @@ public:
     long getLastCheck() const               {   return m_lHTALastCheck; }
     void setLastCheck(long check)           {   m_lHTALastCheck = check;}
 
-    void setContext(HttpContext *pContext)  {  m_pContext = pContext;  }
+    void setContext(HttpContext *pContext)
+    {   ls_atomic_store(&m_pContext, pContext);  }
+
+    // Atomically swap context pointer. Returns true if swap succeeded
+    // (this thread won the race). On success, caller must recycleContext(pOld).
+    // On failure, another thread already swapped; caller should delete pNew.
+    bool casSwapContext(HttpContext *pOld, HttpContext *pNew)
+    {   return ls_atomic_casptr(&m_pContext, pOld, pNew);   }
+
+    // Atomic CAS on m_lHTALastCheck for per-node throttling.
+    // Returns true if this thread claimed the check window.
+    bool casLastCheck(long expected, long desired)
+    {   return ls_atomic_caslong(&m_lHTALastCheck, expected, desired);  }
     void setContextUpdateParent(HttpContext *pContext, int noUpdateRedirect);
     ContextNode *insertChild(const char *pchLabel);
     ContextNode *match(const char *pStart);

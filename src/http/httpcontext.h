@@ -103,6 +103,7 @@ class HttpHeaderOps;
 #define BIT_SATISFY         (1<<16)
 #define BIT_SATISFY_ANY     (1<<17)
 #define BIT_AUTOINDEX       (1<<18)
+#define BIT_HTA_OWNS_UDIR  (1<<19)
 
 #define BIT_AUTHORIZER      (1<<20)
 #define BIT_DIRINDEX        (1<<21)
@@ -579,6 +580,8 @@ public:
     int configErrorPages(const XmlNode *pNode);
     int configRewriteRule(const RewriteMapList *pMapList, char *pRule,
                           const char *htaccessPath);
+    int htaccessConfigFull(const RewriteMapList *pMapList,
+                           const char *htaccessPath);
     int configMime(const XmlNode *pContextNode);
     int configExtAuthorizer(const XmlNode *pContextNode);
     int config(const RewriteMapList *pMapList, const XmlNode *pContextNode,

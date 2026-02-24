@@ -7,6 +7,7 @@ endif()
 
 SET(http_STAT_SRCS
    moduserdir.cpp
+   htaccessparser.cpp
    contextnode.cpp
    phpconfig.cpp
    pipeappender.cpp

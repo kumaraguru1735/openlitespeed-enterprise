@@ -52,6 +52,10 @@
 #include <http/smartsettings.h>
 #include <http/staticfilecache.h>
 #include <http/staticfilecachedata.h>
+#include <http/htaccessparser.h>
+#include <http/contextnode.h>
+#include <http/contexttree.h>
+#include <main/configctx.h>
 #include <http/userdir.h>
 #include <http/vhostmap.h>
 #include <http/clientinfo.h>
@@ -91,6 +95,7 @@
 #include <stdio.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -2206,6 +2211,87 @@ void HttpSession::blockParallelRecaptcha()
 }
 
 
+// Check interval for .htaccess mtime (seconds)
+#define HTA_CHECK_INTERVAL 2
+
+// Thread-safe .htaccess reload: creates a NEW HttpContext, parses into it,
+// atomically CAS-swaps the pointer in ContextNode, and defers deletion of
+// the old context via recycleContext() (holds for connTimeout seconds).
+static void checkHtaccessReload(ContextNode *pNode, HttpContext *pCtx)
+{
+    if (!pNode || !pCtx || !pCtx->getLocation() || pCtx->getLastMod() <= 0)
+        return;
+
+    // Per-node throttle: atomic CAS claims the check window.
+    // If CAS fails, another thread already claimed it — skip.
+    long lastCheck = pNode->getLastCheck();
+    long now = (long)DateTime::s_curTime;
+    if (now - lastCheck < HTA_CHECK_INTERVAL)
+        return;
+    if (!pNode->casLastCheck(lastCheck, now))
+        return;
+
+    AutoStr2 htaPath;
+    htaPath.setStr(pCtx->getLocation(), pCtx->getLocationLen());
+    htaPath.append(".htaccess", 9);
+
+    struct stat st;
+    if (stat(htaPath.c_str(), &st) == 0)
+    {
+        if (st.st_mtime > pCtx->getLastMod())
+        {
+            LS_INFO("[.htaccess] File changed, reloading: %s", htaPath.c_str());
+
+            // Build a fresh context and parse .htaccess into it
+            HttpContext *pNewCtx = new HttpContext();
+            if (!pNewCtx)
+                return;
+            pNewCtx->allocateInternal();
+            pNewCtx->set(pCtx->getURI(), pCtx->getLocation(),
+                         pCtx->getHandler(), pCtx->allowBrowse());
+            pNewCtx->setParent(pCtx->getParent());
+            if (pCtx->getParent())
+                pNewCtx->inherit(pCtx->getParent());
+
+            // ConfigCtx is __thread, so each worker gets its own stack
+            ConfigCtx cfg("htaccess-reload");
+            pNewCtx->htaccessConfigFull(NULL, htaPath.c_str());
+
+            // Atomic pointer swap in the ContextNode
+            if (pNode->casSwapContext(pCtx, pNewCtx))
+                recycleContext(pCtx);   // defer-delete old context
+            else
+                delete pNewCtx;         // another thread won the race
+        }
+    }
+    else if (errno == ENOENT)
+    {
+        LS_INFO("[.htaccess] File removed, clearing config: %s",
+                htaPath.c_str());
+
+        // Build a clean context with no .htaccess config
+        HttpContext *pNewCtx = new HttpContext();
+        if (!pNewCtx)
+            return;
+        pNewCtx->allocateInternal();
+        pNewCtx->set(pCtx->getURI(), pCtx->getLocation(),
+                     pCtx->getHandler(), pCtx->allowBrowse());
+        pNewCtx->setParent(pCtx->getParent());
+        if (pCtx->getParent())
+            pNewCtx->inherit(pCtx->getParent());
+        pNewCtx->setLastMod(0);
+
+        if (pNode->casSwapContext(pCtx, pNewCtx))
+        {
+            pNode->setHTAState(HTA_NONE);
+            recycleContext(pCtx);
+        }
+        else
+            delete pNewCtx;
+    }
+}
+
+
 int HttpSession::processContextMap()
 {
     const HttpContext *pOldCtx = m_request.getContext();
@@ -2225,7 +2311,27 @@ int HttpSession::processContextMap()
     else
     {
         setProcessState(HSPS_CONTEXT_REWRITE);
-        if (((pCtx = (HttpContext *)m_request.getContext()) != pOldCtx)
+        pCtx = (HttpContext *)m_request.getContext();
+
+        // Auto-reload .htaccess if changed (throttled, thread-safe)
+        if (pCtx && pCtx->getLastMod() > 0)
+        {
+            HttpVHost *pVHost = m_request.getVHost();
+            if (pVHost)
+            {
+                const char *pURI = m_request.getURI();
+                if (pURI && *pURI == '/')
+                {
+                    ContextNode *pNode = pVHost->getContextTree()
+                                            ->getRootNode()->match(pURI + 1);
+                    checkHtaccessReload(pNode, pCtx);
+                    // Re-read context after potential swap
+                    pCtx = pNode->getContext();
+                }
+            }
+        }
+
+        if ((pCtx != pOldCtx)
             && pCtx->getModuleConfig() != NULL)
         {
             m_sessionHooks.inherit(pCtx->getSessionHooks(), 0);
