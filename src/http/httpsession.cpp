@@ -77,6 +77,8 @@
 #include <thread/mtnotifier.h>
 #include <util/accesscontrol.h>
 #include <util/accessdef.h>
+#include <util/pcregex.h>
+#include <util/stringlist.h>
 #include <util/datetime.h>
 #include <util/gzipbuf.h>
 #include <util/httputil.h>
@@ -2337,6 +2339,136 @@ int HttpSession::processContextMap()
             m_sessionHooks.inherit(pCtx->getSessionHooks(), 0);
             m_pModuleConfig = pCtx->getModuleConfig();
         }
+
+        // Apply context-level SetEnv/UnsetEnv vars to request
+        if (pCtx)
+        {
+            const StringList *pEnvList = pCtx->getCtxEnvList();
+            if (pEnvList)
+            {
+                StringList::const_iterator iter;
+                for (iter = pEnvList->begin(); iter != pEnvList->end(); ++iter)
+                {
+                    const char *pEntry = (*iter)->c_str();
+                    if (*pEntry == '!')
+                    {
+                        // UnsetEnv: entry is "!KEY"
+                        const char *pKey = pEntry + 1;
+                        m_request.unsetEnv(pKey, strlen(pKey));
+                    }
+                    else
+                    {
+                        // SetEnv: entry is "KEY=VALUE"
+                        const char *pEq = strchr(pEntry, '=');
+                        if (pEq)
+                        {
+                            m_request.addEnv(pEntry, pEq - pEntry,
+                                             pEq + 1, strlen(pEq + 1));
+                        }
+                    }
+                }
+            }
+
+            // Evaluate SetEnvIf rules
+            const EnvIfRule *pRule = pCtx->getEnvIfRules();
+            char srvAddrBuf[128];
+            while (pRule)
+            {
+                // Map attribute to request value
+                const char *pTestVal = NULL;
+                int testLen = 0;
+                const char *pAttr = pRule->m_attribute.c_str();
+                int attrLen = pRule->m_attribute.len();
+
+                if (strncasecmp(pAttr, "Host", attrLen) == 0)
+                {
+                    pTestVal = m_request.getHeader(HttpHeader::H_HOST);
+                    testLen = m_request.getHeaderLen(HttpHeader::H_HOST);
+                }
+                else if (strncasecmp(pAttr, "User-Agent", attrLen) == 0)
+                {
+                    pTestVal = m_request.getHeader(HttpHeader::H_USERAGENT);
+                    testLen = m_request.getHeaderLen(HttpHeader::H_USERAGENT);
+                }
+                else if (strncasecmp(pAttr, "Referer", attrLen) == 0)
+                {
+                    pTestVal = m_request.getHeader(HttpHeader::H_REFERER);
+                    testLen = m_request.getHeaderLen(HttpHeader::H_REFERER);
+                }
+                else if (strncasecmp(pAttr, "Request_URI", attrLen) == 0)
+                {
+                    pTestVal = m_request.getURI();
+                    if (pTestVal)
+                        testLen = m_request.getURILen();
+                }
+                else if (strncasecmp(pAttr, "Remote_Addr", attrLen) == 0)
+                {
+                    pTestVal = getPeerAddrString();
+                    if (pTestVal)
+                        testLen = strlen(pTestVal);
+                }
+                else if (strncasecmp(pAttr, "Request_Method", attrLen) == 0)
+                {
+                    pTestVal = HttpMethod::get(m_request.getMethod());
+                    if (pTestVal)
+                        testLen = strlen(pTestVal);
+                }
+                else if (strncasecmp(pAttr, "Server_Addr", attrLen) == 0)
+                {
+                    int addrLen = getServerAddrStr(srvAddrBuf,
+                                                   sizeof(srvAddrBuf));
+                    if (addrLen > 0)
+                    {
+                        pTestVal = srvAddrBuf;
+                        testLen = addrLen;
+                    }
+                }
+                else
+                {
+                    // Try as HTTP request header
+                    int valLen = 0;
+                    pTestVal = m_request.getHeader(pAttr, attrLen, valLen);
+                    if (pTestVal && valLen > 0)
+                        testLen = valLen;
+                    else
+                        pTestVal = NULL;
+                }
+
+                if (pTestVal && testLen > 0 && pRule->m_pRegex)
+                {
+                    int ovector[30];
+                    int rc = pRule->m_pRegex->exec(pTestVal, testLen, 0, 0,
+                                                   ovector, 30);
+                    if (rc >= 0)
+                    {
+                        // Match: apply env var assignment
+                        const char *pAssign = pRule->m_envAssign.c_str();
+                        if (*pAssign == '!')
+                        {
+                            // !VAR means unset
+                            m_request.unsetEnv(pAssign + 1,
+                                               strlen(pAssign + 1));
+                        }
+                        else
+                        {
+                            const char *pEq = strchr(pAssign, '=');
+                            if (pEq)
+                            {
+                                m_request.addEnv(pAssign, pEq - pAssign,
+                                                 pEq + 1, strlen(pEq + 1));
+                            }
+                            else
+                            {
+                                // No =, set to "1"
+                                m_request.addEnv(pAssign, strlen(pAssign),
+                                                 "1", 1);
+                            }
+                        }
+                    }
+                }
+                pRule = pRule->m_pNext;
+            }
+        }
     }
     return ret;
 }
@@ -2491,6 +2623,42 @@ int HttpSession::processContextAuth()
             else
                 satisfy = satisfyAny;
         }
+        // Check env-based access rules (Deny from env=VAR / Allow from env=VAR)
+        const HttpContext *pAuthCtx = m_request.getContext();
+        if (pAuthCtx)
+        {
+            const StringList *pEnvRules = pAuthCtx->getEnvAccessRules();
+            if (pEnvRules)
+            {
+                StringList::const_iterator iter;
+                for (iter = pEnvRules->begin();
+                     iter != pEnvRules->end(); ++iter)
+                {
+                    const char *pEntry = (*iter)->c_str();
+                    int isDeny = (*pEntry == '!');
+                    const char *pVarName = isDeny ? pEntry + 1 : pEntry;
+                    int valLen = 0;
+                    const char *pVal = m_request.getEnv(
+                        pVarName, strlen(pVarName), valLen);
+                    if (pVal && valLen > 0)
+                    {
+                        if (isDeny)
+                        {
+                            if (!satisfyAny || !aaa.m_pHTAuth)
+                            {
+                                LS_INFO(getLogSession(),
+                                        "[ACL] Access denied by env=%s",
+                                        pVarName);
+                                return SC_403;
+                            }
+                        }
+                        else
+                            satisfy = satisfyAny;
+                    }
+                }
+            }
+        }
+
         if (!satisfy && ! m_request.isChallenge())
         {
             if (aaa.m_pRequired && aaa.m_pHTAuth)

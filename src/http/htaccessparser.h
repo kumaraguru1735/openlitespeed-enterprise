@@ -121,6 +121,15 @@ class HtAccessParser
 
     static int handleSSLRequireSSL(HttpContext *pContext);
 
+    static int handleSetEnv(HttpContext *pContext, const char *pArgs);
+    static int handleUnsetEnv(HttpContext *pContext, const char *pArgs);
+    static int handleSetEnvIf(HttpContext *pContext, const char *pArgs,
+                              int noCase);
+    static int handleSetHandler(HttpContext *pContext, const char *pArgs,
+                                const char *pLogId);
+    static int handleFallbackResource(HtParseState &state, const char *pArgs);
+    static int handleFileETag(HttpContext *pContext, const char *pArgs);
+
     static int finalizeAuth(HtParseState &state, HttpContext *pContext);
     static int finalizeRewrite(HtParseState &state, HttpContext *pContext,
                                const RewriteMapList *pMapList);

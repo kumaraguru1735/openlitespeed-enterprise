@@ -35,6 +35,7 @@ class HTAuth;
 //class HTACache;
 class HttpMime;
 class MimeSetting;
+class Pcregex;
 class PHPConfig;
 class ReqHandler;
 class RewriteRuleList;
@@ -112,6 +113,7 @@ class HttpHeaderOps;
 #define BIT_AUTH_REQ        (1<<24)
 #define BIT_FILES_MATCH     (1<<25)
 #define BIT_EXTRA_HEADER    (1<<26)
+#define BIT_SETENV          (1<<27)
 
 #define BIT_GEO_IP          (1<<28)
 #define BIT_ENABLE_SCRIPT   (1<<29)
@@ -145,6 +147,8 @@ class HttpHeaderOps;
 #define BIT2_FILES_ETAG         (1<<12)
 
 #define BIT2_WEBSOCKADDR        (1<<14)
+#define BIT2_SETENVIF           (1<<15)
+#define BIT2_ENV_ACCESS         (1<<16)
 
 #define BIT2_IPTOLOC            (1<<22)
 #define BIT2_CHECK_CAPTCHA      (1<<23)
@@ -173,6 +177,15 @@ class HttpHeaderOps;
 *
 *
 ***********************************************************************/
+
+struct EnvIfRule
+{
+    AutoStr2        m_attribute;    // "Host", "User-Agent", "Request_URI", etc.
+    const Pcregex  *m_pRegex;      // Compiled regex pattern
+    AutoStr2        m_envAssign;    // "VAR=value" or "VAR" (sets to "1")
+    int             m_iNoCase;      // 1 for SetEnvIfNoCase
+    EnvIfRule      *m_pNext;        // Linked list
+};
 
 struct AAAData
 {
@@ -204,6 +217,10 @@ typedef struct _CTX_INT
 
     GSockAddr            *m_pAddrWebSock;
     char                 *m_pWebSockAddrStr;
+
+    StringList           *m_pEnvList;
+    EnvIfRule            *m_pEnvIfRules;
+    StringList           *m_pEnvAccessRules;
 
 } CtxInt;
 
@@ -499,6 +516,20 @@ public:
     void setWebSockAddr(const char *addrStr, const GSockAddr *gsockAddr, bool ssl);
     bool isWebSockSec() const
     {   return m_iFeatures & BIT_F_WSS;   }
+
+    int addCtxEnv(const char *pEnvStr);
+    const StringList *getCtxEnvList() const
+    {   return m_pInternal->m_pEnvList;   }
+
+    int addEnvIfRule(const char *pAttr, int attrLen,
+                     const char *pPattern, int noCase,
+                     const char *pEnvAssign);
+    const EnvIfRule *getEnvIfRules() const
+    {   return m_pInternal->m_pEnvIfRules;   }
+
+    int addEnvAccessRule(const char *pEnvName, int isAllow);
+    const StringList *getEnvAccessRules() const
+    {   return m_pInternal->m_pEnvAccessRules;   }
 
     void setGeoIP(int a)
     {

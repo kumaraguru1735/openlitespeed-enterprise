@@ -39,6 +39,7 @@
 #include <lsr/ls_strtool.h>
 #include <main/configctx.h>
 #include <util/accesscontrol.h>
+#include <util/pcregex.h>
 #include <util/pool.h>
 #include <util/stringlist.h>
 #include <util/stringtool.h>
@@ -56,7 +57,8 @@ CtxInt HttpContext::s_defaultInternal =
 {
     NULL, NULL, NULL, NULL, NULL, NULL,
     NULL, NULL, NULL, NULL, NULL, NULL,
-    NULL, NULL, NULL, NULL, NULL
+    NULL, NULL, NULL, NULL, NULL,
+    NULL, NULL, NULL
 } ;
 
 
@@ -183,6 +185,20 @@ void HttpContext::releaseHTAConf()
             if (m_pInternal->m_pWebSockAddrStr)
                 free(m_pInternal->m_pWebSockAddrStr);
         }
+        if ((m_iConfigBits & BIT_SETENV) && (m_pInternal->m_pEnvList))
+            delete m_pInternal->m_pEnvList;
+        if (m_iConfigBits2 & BIT2_SETENVIF)
+        {
+            EnvIfRule *pRule = m_pInternal->m_pEnvIfRules;
+            while (pRule)
+            {
+                EnvIfRule *pNext = pRule->m_pNext;
+                delete pRule;
+                pRule = pNext;
+            }
+        }
+        if ((m_iConfigBits2 & BIT2_ENV_ACCESS) && (m_pInternal->m_pEnvAccessRules))
+            delete m_pInternal->m_pEnvAccessRules;
         // If auth was created from .htaccess, we own the UserDir too
         if ((m_iConfigBits & BIT_HTA_OWNS_UDIR) && m_pInternal->m_pHTAuth)
         {
@@ -708,6 +724,13 @@ void HttpContext::inherit(const HttpContext *pRootContext)
             m_pInternal->m_pWebSockAddrStr = m_pParent->m_pInternal->m_pWebSockAddrStr;
             setFeaturesBit(BIT_F_WSS, m_pParent->m_iFeatures & BIT_F_WSS);
         }
+
+        if (!(m_iConfigBits & BIT_SETENV))
+            m_pInternal->m_pEnvList = m_pParent->m_pInternal->m_pEnvList;
+        if (!(m_iConfigBits2 & BIT2_SETENVIF))
+            m_pInternal->m_pEnvIfRules = m_pParent->m_pInternal->m_pEnvIfRules;
+        if (!(m_iConfigBits2 & BIT2_ENV_ACCESS))
+            m_pInternal->m_pEnvAccessRules = m_pParent->m_pInternal->m_pEnvAccessRules;
     }
 
     if (!(m_iConfigBits & BIT_ENABLE_EXPIRES))
@@ -1229,6 +1252,87 @@ void HttpContext::setWebSockAddr(const char *addrStr,
         setFeaturesBit(BIT_F_WSS, ssl);
         m_iConfigBits2 |= BIT2_WEBSOCKADDR;
     }
+}
+
+
+int HttpContext::addCtxEnv(const char *pEnvStr)
+{
+    if (!(m_iConfigBits & BIT_SETENV))
+    {
+        if (allocateInternal())
+            return LS_FAIL;
+        m_pInternal->m_pEnvList = new StringList();
+        if (!m_pInternal->m_pEnvList)
+            return LS_FAIL;
+        m_iConfigBits |= BIT_SETENV;
+    }
+    m_pInternal->m_pEnvList->add(pEnvStr);
+    return 0;
+}
+
+
+int HttpContext::addEnvIfRule(const char *pAttr, int attrLen,
+                              const char *pPattern, int noCase,
+                              const char *pEnvAssign)
+{
+    if (allocateInternal())
+        return LS_FAIL;
+
+    EnvIfRule *pRule = new EnvIfRule();
+    if (!pRule)
+        return LS_FAIL;
+    pRule->m_attribute.setStr(pAttr, attrLen);
+    pRule->m_envAssign.setStr(pEnvAssign);
+    pRule->m_iNoCase = noCase;
+    pRule->m_pNext = NULL;
+
+    int options = REG_EXTENDED;
+    if (noCase)
+        options |= REG_ICASE;
+    pRule->m_pRegex = Pcregex::get(pPattern, options);
+    if (!pRule->m_pRegex)
+    {
+        LS_WARN("[.htaccess] Failed to compile SetEnvIf regex: %s", pPattern);
+        delete pRule;
+        return LS_FAIL;
+    }
+
+    // Append to end of linked list
+    if (!m_pInternal->m_pEnvIfRules)
+        m_pInternal->m_pEnvIfRules = pRule;
+    else
+    {
+        EnvIfRule *pLast = m_pInternal->m_pEnvIfRules;
+        while (pLast->m_pNext)
+            pLast = pLast->m_pNext;
+        pLast->m_pNext = pRule;
+    }
+    m_iConfigBits2 |= BIT2_SETENVIF;
+    return 0;
+}
+
+
+int HttpContext::addEnvAccessRule(const char *pEnvName, int isAllow)
+{
+    if (!(m_iConfigBits2 & BIT2_ENV_ACCESS))
+    {
+        if (allocateInternal())
+            return LS_FAIL;
+        m_pInternal->m_pEnvAccessRules = new StringList();
+        if (!m_pInternal->m_pEnvAccessRules)
+            return LS_FAIL;
+        m_iConfigBits2 |= BIT2_ENV_ACCESS;
+    }
+    // Store as "varname" for allow, "!varname" for deny
+    if (isAllow)
+        m_pInternal->m_pEnvAccessRules->add(pEnvName);
+    else
+    {
+        char buf[1024];
+        snprintf(buf, sizeof(buf), "!%s", pEnvName);
+        m_pInternal->m_pEnvAccessRules->add(buf);
+    }
+    return 0;
 }
 
 

@@ -29,6 +29,7 @@
 #include <log4cxx/tmplogid.h>
 #include <util/accesscontrol.h>
 #include <util/autostr.h>
+#include <util/pcregex.h>
 #include <util/stringtool.h>
 
 #include <ctype.h>
@@ -283,6 +284,23 @@ int HtAccessParser::handleAllow(HttpContext *pContext, const char *pArgs)
     {
         pArgs += 4;
         pArgs = skipWhitespace(pArgs);
+        // Check for env= syntax: "Allow from env=VARNAME"
+        if (strncasecmp(pArgs, "env=", 4) == 0)
+        {
+            const char *pEnvName = pArgs + 4;
+            int envLen = strlen(pEnvName);
+            envLen = trimmedLen(pEnvName, envLen);
+            if (envLen > 0)
+            {
+                char envBuf[1024];
+                if (envLen >= (int)sizeof(envBuf))
+                    envLen = sizeof(envBuf) - 1;
+                memcpy(envBuf, pEnvName, envLen);
+                envBuf[envLen] = 0;
+                pContext->addEnvAccessRule(envBuf, 1);
+            }
+            return 0;
+        }
         int len = strlen(pArgs);
         len = trimmedLen(pArgs, len);
         if (len > 0)
@@ -310,6 +328,23 @@ int HtAccessParser::handleDeny(HttpContext *pContext, const char *pArgs)
     {
         pArgs += 4;
         pArgs = skipWhitespace(pArgs);
+        // Check for env= syntax: "Deny from env=VARNAME"
+        if (strncasecmp(pArgs, "env=", 4) == 0)
+        {
+            const char *pEnvName = pArgs + 4;
+            int envLen = strlen(pEnvName);
+            envLen = trimmedLen(pEnvName, envLen);
+            if (envLen > 0)
+            {
+                char envBuf[1024];
+                if (envLen >= (int)sizeof(envBuf))
+                    envLen = sizeof(envBuf) - 1;
+                memcpy(envBuf, pEnvName, envLen);
+                envBuf[envLen] = 0;
+                pContext->addEnvAccessRule(envBuf, 0);
+            }
+            return 0;
+        }
         int len = strlen(pArgs);
         len = trimmedLen(pArgs, len);
         if (len > 0)
@@ -1011,6 +1046,262 @@ int HtAccessParser::handleSSLRequireSSL(HttpContext *pContext)
 }
 
 
+int HtAccessParser::handleSetEnv(HttpContext *pContext, const char *pArgs)
+{
+    pArgs = skipWhitespace(pArgs);
+    // Set KV
+    const char *pKey = pArgs;
+    while (*pArgs && !isspace(*pArgs))
+        ++pArgs;
+    int keyLen = pArgs - pKey;
+    if (keyLen <= 0)
+        return -1;
+
+    pArgs = skipWhitespace(pArgs);
+    int valLen = strlen(pArgs);
+    valLen = trimmedLen(pArgs, valLen);
+
+    // Store as "KEY=VALUE"
+    char buf[4096];
+    if (valLen > 0)
+        snprintf(buf, sizeof(buf), "%.*s=%.*s", keyLen, pKey, valLen, pArgs);
+    else
+        snprintf(buf, sizeof(buf), "%.*s=", keyLen, pKey);
+
+    return pContext->addCtxEnv(buf);
+}
+
+
+int HtAccessParser::handleUnsetEnv(HttpContext *pContext, const char *pArgs)
+{
+    pArgs = skipWhitespace(pArgs);
+    int len = strlen(pArgs);
+    len = trimmedLen(pArgs, len);
+    if (len <= 0)
+        return -1;
+
+    // Store as "!KEY"
+    char buf[4096];
+    snprintf(buf, sizeof(buf), "!%.*s", len, pArgs);
+    return pContext->addCtxEnv(buf);
+}
+
+
+int HtAccessParser::handleSetEnvIf(HttpContext *pContext, const char *pArgs,
+                                    int noCase)
+{
+    pArgs = skipWhitespace(pArgs);
+
+    // SetEnvIf attribute regex [!]env-variable[=value] ...
+    const char *pAttr;
+    int attrLen;
+    pArgs = extractArg(pArgs, &pAttr, &attrLen);
+    if (attrLen <= 0)
+        return -1;
+
+    // Parse regex
+    const char *pPattern;
+    int patLen;
+    pArgs = extractArg(pArgs, &pPattern, &patLen);
+    if (patLen <= 0)
+        return -1;
+
+    char patBuf[4096];
+    if (patLen >= (int)sizeof(patBuf))
+        patLen = sizeof(patBuf) - 1;
+    memcpy(patBuf, pPattern, patLen);
+    patBuf[patLen] = 0;
+
+    // Parse env var assignments (there can be multiple)
+    while (*pArgs)
+    {
+        const char *pEnv;
+        int envLen;
+        pArgs = extractArg(pArgs, &pEnv, &envLen);
+        if (envLen <= 0)
+            break;
+
+        char envBuf[1024];
+        if (envLen >= (int)sizeof(envBuf))
+            envLen = sizeof(envBuf) - 1;
+        memcpy(envBuf, pEnv, envLen);
+        envBuf[envLen] = 0;
+
+        char attrBuf[256];
+        if (attrLen >= (int)sizeof(attrBuf))
+            attrLen = sizeof(attrBuf) - 1;
+        memcpy(attrBuf, pAttr, attrLen);
+        attrBuf[attrLen] = 0;
+
+        pContext->addEnvIfRule(attrBuf, attrLen, patBuf, noCase, envBuf);
+    }
+    return 0;
+}
+
+
+int HtAccessParser::handleSetHandler(HttpContext *pContext, const char *pArgs,
+                                      const char *pLogId)
+{
+    pArgs = skipWhitespace(pArgs);
+
+    // Strip quotes
+    const char *pStart;
+    int argLen;
+    extractArg(pArgs, &pStart, &argLen);
+    if (argLen <= 0)
+        return -1;
+
+    char buf[256];
+    if (argLen >= (int)sizeof(buf))
+        argLen = sizeof(buf) - 1;
+    memcpy(buf, pStart, argLen);
+    buf[argLen] = 0;
+
+    // SetHandler None to clear handler
+    if (strncasecmp(buf, "none", 4) == 0)
+        return 0;
+
+    // proxy:fcgi:// log warning, needs vhost-level config
+    if (strncasecmp(buf, "proxy:", 6) == 0)
+    {
+        LS_WARN("[.htaccess] SetHandler '%s' — proxy:fcgi handlers should be "
+                "configured at the vhost level in OLS, not in .htaccess", buf);
+        return 0;
+    }
+
+    // server-status, server-info not applicable
+    if (strncasecmp(buf, "server-", 7) == 0)
+        return 0;
+
+    // Map common handler names to MIME types
+    char mimeBuf[256];
+    if (strncasecmp(buf, "application/", 12) == 0)
+    {
+        // Already a MIME type
+        lstrncpy(mimeBuf, buf, sizeof(mimeBuf));
+    }
+    else if (strncasecmp(buf, "cgi-script", 10) == 0)
+        lstrncpy(mimeBuf, "application/x-httpd-cgi", sizeof(mimeBuf));
+    else if (strncasecmp(buf, "php", 3) == 0
+             || strcasestr(buf, "php") != NULL)
+        lstrncpy(mimeBuf, "application/x-httpd-php", sizeof(mimeBuf));
+    else if (strncasecmp(buf, "default-handler", 15) == 0)
+        return 0;  // No-op: serve as static file (default)
+    else
+    {
+        // Generic: try as application/x-httpd-<handler>
+        snprintf(mimeBuf, sizeof(mimeBuf), "application/x-httpd-%s", buf);
+    }
+
+    return pContext->setForceType(mimeBuf, pLogId);
+}
+
+
+int HtAccessParser::handleFallbackResource(HtParseState &state,
+                                            const char *pArgs)
+{
+    pArgs = skipWhitespace(pArgs);
+    int len = strlen(pArgs);
+    len = trimmedLen(pArgs, len);
+    if (len <= 0)
+        return 0;
+
+    // FallbackResource disabled = no-op
+    if (strncasecmp(pArgs, "disabled", 8) == 0)
+        return 0;
+
+    // Convert to rewrite rules:
+    //   RewriteEngine On
+    //   RewriteCond %{REQUEST_FILENAME} !-f
+    //   RewriteCond %{REQUEST_FILENAME} !-d
+    //   RewriteRule . <fallback-uri> [L]
+    state.rewriteBuf.append("RewriteEngine On\n", 18);
+    state.rewriteBuf.append("RewriteCond %{REQUEST_FILENAME} !-f\n", 35);
+    state.rewriteBuf.append("RewriteCond %{REQUEST_FILENAME} !-d\n", 35);
+
+    char rule[1024];
+    int ruleLen = snprintf(rule, sizeof(rule), "RewriteRule . %.*s [L]\n",
+                           len, pArgs);
+    state.rewriteBuf.append(rule, ruleLen);
+    return 0;
+}
+
+
+int HtAccessParser::handleFileETag(HttpContext *pContext, const char *pArgs)
+{
+    pArgs = skipWhitespace(pArgs);
+
+    if (strncasecmp(pArgs, "None", 4) == 0)
+    {
+        pContext->setFileEtag(ETAG_NONE);
+        return 0;
+    }
+    if (strncasecmp(pArgs, "All", 3) == 0)
+    {
+        pContext->setFileEtag(ETAG_ALL);
+        return 0;
+    }
+
+    int etag = pContext->getFileEtag();
+    int modified = 0;
+    while (*pArgs)
+    {
+        int enable = 1;
+        if (*pArgs == '+')
+        {
+            enable = 1;
+            ++pArgs;
+        }
+        else if (*pArgs == '-')
+        {
+            enable = 0;
+            ++pArgs;
+        }
+
+        if (strncasecmp(pArgs, "INode", 5) == 0)
+        {
+            if (enable)
+                etag |= ETAG_INODE;
+            else
+                etag &= ~ETAG_INODE;
+            pArgs += 5;
+            modified = 1;
+        }
+        else if (strncasecmp(pArgs, "MTime", 5) == 0)
+        {
+            if (enable)
+                etag |= ETAG_MTIME;
+            else
+                etag &= ~ETAG_MTIME;
+            pArgs += 5;
+            modified = 1;
+        }
+        else if (strncasecmp(pArgs, "Size", 4) == 0)
+        {
+            if (enable)
+                etag |= ETAG_SIZE;
+            else
+                etag &= ~ETAG_SIZE;
+            pArgs += 4;
+            modified = 1;
+        }
+        else
+        {
+            // Skip unknown word
+            while (*pArgs && !isspace(*pArgs))
+                ++pArgs;
+        }
+
+        while (*pArgs && isspace(*pArgs))
+            ++pArgs;
+    }
+
+    if (modified)
+        pContext->setFileEtag(etag);
+    return 0;
+}
+
+
 int HtAccessParser::finalizeRewrite(HtParseState &state,
                                     HttpContext *pContext,
                                     const RewriteMapList *pMapList)
@@ -1306,18 +1597,47 @@ int HtAccessParser::parse(const char *pBuf, int len,
         {
             handleRedirect(state, pLine + 8, 0);
         }
-        // SetEnvIf — basic support
+        // SetEnvIfNoCase
+        else if (strncasecmp(pLine, "SetEnvIfNoCase", 14) == 0
+                 && isspace(pLine[14]))
+        {
+            handleSetEnvIf(pTargetCtx, pLine + 14, 1);
+        }
+        // SetEnvIf
         else if (strncasecmp(pLine, "SetEnvIf", 8) == 0
                  && isspace(pLine[8]))
         {
-            LS_INFO("[.htaccess] SetEnvIf not fully supported, ignored: %s",
-                    pLine);
+            handleSetEnvIf(pTargetCtx, pLine + 8, 0);
         }
+        // SetHandler
+        else if (strncasecmp(pLine, "SetHandler", 10) == 0
+                 && isspace(pLine[10]))
+        {
+            handleSetHandler(pTargetCtx, pLine + 10, state.pLogId);
+        }
+        // SetEnv
         else if (strncasecmp(pLine, "SetEnv", 6) == 0
                  && isspace(pLine[6]))
         {
-            LS_INFO("[.htaccess] SetEnv not fully supported, ignored: %s",
-                    pLine);
+            handleSetEnv(pTargetCtx, pLine + 6);
+        }
+        // UnsetEnv
+        else if (strncasecmp(pLine, "UnsetEnv", 8) == 0
+                 && isspace(pLine[8]))
+        {
+            handleUnsetEnv(pTargetCtx, pLine + 8);
+        }
+        // FallbackResource
+        else if (strncasecmp(pLine, "FallbackResource", 16) == 0
+                 && isspace(pLine[16]))
+        {
+            handleFallbackResource(state, pLine + 16);
+        }
+        // FileETag
+        else if (strncasecmp(pLine, "FileETag", 8) == 0
+                 && isspace(pLine[8]))
+        {
+            handleFileETag(pTargetCtx, pLine + 8);
         }
         // SSLRequireSSL
         else if (strncasecmp(pLine, "SSLRequireSSL", 13) == 0)
