@@ -49,16 +49,33 @@ struct HtParseState
     AutoStr2    requireLine;
     int         ifModuleSkip;
     int         ifModuleNesting;
+    int         ifBlockSkip;
+    int         ifDefineSkip;
+    int         limitExceptSkip;
+    int         inLimitBlock;
+    int         ifExprActive;
+    int         ifExprCounter;
+    char        ifExprEnvVar[32];
     HttpContext *pFilesCtx;
     uint32_t    allowOverride;
     const char *pLogId;
+    const char *pContextURI;
+    int         contextURILen;
 
     HtParseState()
         : ifModuleSkip(0)
         , ifModuleNesting(0)
+        , ifBlockSkip(0)
+        , ifDefineSkip(0)
+        , limitExceptSkip(0)
+        , inLimitBlock(0)
+        , ifExprActive(0)
+        , ifExprCounter(0)
         , pFilesCtx(NULL)
         , allowOverride(HTA_ALLOW_ALL)
         , pLogId(NULL)
+        , pContextURI(NULL)
+        , contextURILen(0)
     {}
 };
 
@@ -78,7 +95,8 @@ class HtAccessParser
     static int handleAuthUserFile(HtParseState &state, const char *pArgs,
                                   HttpContext *pContext);
     static int handleAuthGroupFile(HtParseState &state, const char *pArgs);
-    static int handleRequire(HtParseState &state, const char *pArgs);
+    static int handleRequire(HtParseState &state, HttpContext *pContext,
+                             const char *pArgs);
 
     static int handleOrder(HtParseState &state, HttpContext *pContext,
                            const char *pArgs);

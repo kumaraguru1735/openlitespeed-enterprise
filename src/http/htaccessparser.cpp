@@ -118,6 +118,7 @@ int HtAccessParser::isKnownModule(const char *pModule, int len)
         "mod_auth_digest.c", "mod_authz_core.c", "mod_setenvif.c",
         "mod_mime.c", "mod_dir.c", "mod_autoindex.c",
         "mod_alias.c", "mod_filter.c", "mod_env.c",
+        "LiteSpeed",
         NULL
     };
     for (int i = 0; s_knownModules[i]; ++i)
@@ -191,13 +192,128 @@ int HtAccessParser::handleAuthGroupFile(HtParseState &state, const char *pArgs)
 }
 
 
-int HtAccessParser::handleRequire(HtParseState &state, const char *pArgs)
+int HtAccessParser::handleRequire(HtParseState &state, HttpContext *pContext,
+                                   const char *pArgs)
 {
     pArgs = skipWhitespace(pArgs);
     int len = strlen(pArgs);
     len = trimmedLen(pArgs, len);
-    if (len > 0)
-        state.requireLine.setStr(pArgs, len);
+    if (len <= 0)
+        return 0;
+
+    // Apache 2.4 syntax: Require all granted/denied
+    if (strncasecmp(pArgs, "all", 3) == 0)
+    {
+        const char *p = skipWhitespace(pArgs + 3);
+        if (strncasecmp(p, "granted", 7) == 0)
+        {
+            pContext->addAccessRule("ALL", 1);
+            LS_DBG("[.htaccess] Require all granted — allowing all access");
+            return 0;
+        }
+        else if (strncasecmp(p, "denied", 6) == 0)
+        {
+            pContext->addAccessRule("ALL", 0);
+            LS_DBG("[.htaccess] Require all denied — denying all access");
+            return 0;
+        }
+    }
+    // Apache 2.4: Require ip 10.0.0.0/8 192.168.0.0/16 ...
+    else if (strncasecmp(pArgs, "ip", 2) == 0 && isspace(pArgs[2]))
+    {
+        const char *p = skipWhitespace(pArgs + 2);
+        int ipLen = strlen(p);
+        ipLen = trimmedLen(p, ipLen);
+        if (ipLen > 0)
+        {
+            char buf[4096];
+            if (ipLen >= (int)sizeof(buf))
+                ipLen = sizeof(buf) - 1;
+            memcpy(buf, p, ipLen);
+            buf[ipLen] = 0;
+            pContext->addAccessRule(buf, 1);
+            LS_DBG("[.htaccess] Require ip %s — allowing from IP", buf);
+        }
+        return 0;
+    }
+    // Apache 2.4: Require not ip ... / Require not host ...
+    else if (strncasecmp(pArgs, "not", 3) == 0 && isspace(pArgs[3]))
+    {
+        const char *p = skipWhitespace(pArgs + 3);
+        if (strncasecmp(p, "ip", 2) == 0 && isspace(p[2]))
+        {
+            p = skipWhitespace(p + 2);
+            int ipLen = strlen(p);
+            ipLen = trimmedLen(p, ipLen);
+            if (ipLen > 0)
+            {
+                char buf[4096];
+                if (ipLen >= (int)sizeof(buf))
+                    ipLen = sizeof(buf) - 1;
+                memcpy(buf, p, ipLen);
+                buf[ipLen] = 0;
+                pContext->addAccessRule(buf, 0);
+                LS_DBG("[.htaccess] Require not ip %s — denying from IP", buf);
+            }
+            return 0;
+        }
+        else if (strncasecmp(p, "host", 4) == 0 && isspace(p[4]))
+        {
+            LS_INFO("[.htaccess] Require not host — host-based deny not "
+                    "fully supported, ignored");
+            return 0;
+        }
+    }
+    // Apache 2.4: Require host example.com
+    else if (strncasecmp(pArgs, "host", 4) == 0 && isspace(pArgs[4]))
+    {
+        LS_INFO("[.htaccess] Require host — host-based access not "
+                "fully supported, ignored");
+        return 0;
+    }
+    // Apache 2.4: Require method GET POST ...
+    else if (strncasecmp(pArgs, "method", 6) == 0 && isspace(pArgs[6]))
+    {
+        // Allow only listed methods, deny others via rewrite
+        const char *p = skipWhitespace(pArgs + 6);
+        int mLen = strlen(p);
+        mLen = trimmedLen(p, mLen);
+        if (mLen > 0)
+        {
+            // Build method list, replace spaces with |
+            char methods[512];
+            int outLen = 0;
+            for (int i = 0; i < mLen && outLen < (int)sizeof(methods) - 2; ++i)
+            {
+                if (isspace(p[i]))
+                {
+                    if (outLen > 0 && methods[outLen - 1] != '|')
+                        methods[outLen++] = '|';
+                }
+                else
+                    methods[outLen++] = p[i];
+            }
+            methods[outLen] = 0;
+            char ruleBuf[1024];
+            int rLen = snprintf(ruleBuf, sizeof(ruleBuf),
+                "RewriteCond %%{REQUEST_METHOD} !^(%s)$ [NC]\n"
+                "RewriteRule .* - [F,L]\n", methods);
+            if (rLen > 0 && rLen < (int)sizeof(ruleBuf))
+                state.rewriteBuf.append(ruleBuf, rLen);
+            LS_DBG("[.htaccess] Require method %s — blocking other methods",
+                   methods);
+        }
+        return 0;
+    }
+    // Apache 2.4: Require expr — not supported
+    else if (strncasecmp(pArgs, "expr", 4) == 0)
+    {
+        LS_INFO("[.htaccess] Require expr not supported, ignored");
+        return 0;
+    }
+
+    // Traditional: Require valid-user / Require user ... / Require group ...
+    state.requireLine.setStr(pArgs, len);
     return 0;
 }
 
@@ -973,6 +1089,17 @@ int HtAccessParser::handleRedirect(HtParseState &state, const char *pArgs,
             return -1;
     }
 
+    // The rewrite engine strips the context base URI before pattern matching,
+    // so we must strip it from the Redirect URL-path to generate a matching
+    // pattern.  e.g. context="/app/", path="/app/old" -> pattern="old"
+    if (state.pContextURI && state.contextURILen > 0
+        && pathLen >= state.contextURILen
+        && strncmp(pPath, state.pContextURI, state.contextURILen) == 0)
+    {
+        pPath += state.contextURILen;
+        pathLen -= state.contextURILen;
+    }
+
     // Convert to RewriteRule: ^escaped-path$ target [R=status,L]
     char escapedPath[4096];
     escapeRegex(pPath, pathLen, escapedPath, sizeof(escapedPath));
@@ -1215,9 +1342,9 @@ int HtAccessParser::handleFallbackResource(HtParseState &state,
     //   RewriteCond %{REQUEST_FILENAME} !-f
     //   RewriteCond %{REQUEST_FILENAME} !-d
     //   RewriteRule . <fallback-uri> [L]
-    state.rewriteBuf.append("RewriteEngine On\n", 18);
-    state.rewriteBuf.append("RewriteCond %{REQUEST_FILENAME} !-f\n", 35);
-    state.rewriteBuf.append("RewriteCond %{REQUEST_FILENAME} !-d\n", 35);
+    state.rewriteBuf.append("RewriteEngine On\n", 17);
+    state.rewriteBuf.append("RewriteCond %{REQUEST_FILENAME} !-f\n", 36);
+    state.rewriteBuf.append("RewriteCond %{REQUEST_FILENAME} !-d\n", 36);
 
     char rule[1024];
     int ruleLen = snprintf(rule, sizeof(rule), "RewriteRule . %.*s [L]\n",
@@ -1337,6 +1464,8 @@ int HtAccessParser::parse(const char *pBuf, int len,
 
     HtParseState state;
     state.pLogId = TmpLogId::getLogId();
+    state.pContextURI = pContext->getURI();
+    state.contextURILen = pContext->getURILen();
 
     // Make a mutable copy for line processing
     char *buf = new char[len + 1];
@@ -1407,6 +1536,71 @@ int HtAccessParser::parse(const char *pBuf, int len,
             continue;
         }
 
+        // Handle </If>, </ElseIf>, </Else> — end of conditional block
+        if (strncasecmp(pLine, "</If>", 5) == 0
+            || strncasecmp(pLine, "</ElseIf>", 9) == 0
+            || strncasecmp(pLine, "</Else>", 7) == 0)
+        {
+            if (state.ifBlockSkip > 0)
+                --state.ifBlockSkip;
+            state.ifExprActive = 0;
+            state.ifExprEnvVar[0] = 0;
+            *pLineEnd = saved;
+            pLine = pLineEnd + 1;
+            continue;
+        }
+
+        // If skipping due to <If>/<ElseIf>/<Else>, track nesting
+        if (state.ifBlockSkip > 0)
+        {
+            if (strncasecmp(pLine, "<If ", 4) == 0
+                || strncasecmp(pLine, "<If>", 4) == 0
+                || strncasecmp(pLine, "<ElseIf ", 8) == 0
+                || strncasecmp(pLine, "<Else>", 6) == 0)
+                ++state.ifBlockSkip;
+            *pLineEnd = saved;
+            pLine = pLineEnd + 1;
+            continue;
+        }
+
+        // Handle </IfDefine>
+        if (strncasecmp(pLine, "</IfDefine", 10) == 0)
+        {
+            if (state.ifDefineSkip > 0)
+                --state.ifDefineSkip;
+            *pLineEnd = saved;
+            pLine = pLineEnd + 1;
+            continue;
+        }
+
+        // If skipping due to <IfDefine>, track nesting
+        if (state.ifDefineSkip > 0)
+        {
+            if (strncasecmp(pLine, "<IfDefine", 9) == 0)
+                ++state.ifDefineSkip;
+            *pLineEnd = saved;
+            pLine = pLineEnd + 1;
+            continue;
+        }
+
+        // Handle </Limit> and </LimitExcept>
+        if (strncasecmp(pLine, "</Limit", 7) == 0)
+        {
+            state.limitExceptSkip = 0;
+            state.inLimitBlock = 0;
+            *pLineEnd = saved;
+            pLine = pLineEnd + 1;
+            continue;
+        }
+
+        // If skipping due to <LimitExcept>, skip directives
+        if (state.limitExceptSkip)
+        {
+            *pLineEnd = saved;
+            pLine = pLineEnd + 1;
+            continue;
+        }
+
         // Determine target context (parent or FilesMatch child)
         HttpContext *pTargetCtx = state.pFilesCtx ? state.pFilesCtx : pContext;
 
@@ -1414,6 +1608,85 @@ int HtAccessParser::parse(const char *pBuf, int len,
         if (strncasecmp(pLine, "<IfModule", 9) == 0)
         {
             handleIfModule(state, pLine + 9);
+        }
+        else if (strncasecmp(pLine, "<IfDefine", 9) == 0)
+        {
+            // OLS has no -D defines; <IfDefine VAR> always skips,
+            // <IfDefine !VAR> always executes
+            const char *pArgs = skipWhitespace(pLine + 9);
+            int negated = (*pArgs == '!');
+            if (!negated)
+            {
+                state.ifDefineSkip = 1;
+                LS_DBG("[.htaccess] Skipping <IfDefine> block (no defines): %s",
+                       pLine);
+            }
+            else
+            {
+                LS_DBG("[.htaccess] Entering <IfDefine !...> block "
+                       "(negated, always true): %s", pLine);
+            }
+        }
+        else if (strncasecmp(pLine, "<LimitExcept", 12) == 0
+                 && (isspace(pLine[12]) || pLine[12] == '>'))
+        {
+            // <LimitExcept METHOD ...> — block non-listed methods via rewrite
+            const char *pArgs = skipWhitespace(pLine + 12);
+            int len = strlen(pArgs);
+            len = trimmedLen(pArgs, len);
+            // Strip trailing >
+            while (len > 0 && (pArgs[len - 1] == '>' || isspace(pArgs[len - 1])))
+                --len;
+            if (len > 0)
+            {
+                // Build method list for RewriteCond pattern
+                char methods[512];
+                int mLen = 0;
+                const char *p = pArgs;
+                const char *pEnd2 = pArgs + len;
+                while (p < pEnd2)
+                {
+                    while (p < pEnd2 && isspace(*p))
+                        ++p;
+                    const char *pStart = p;
+                    while (p < pEnd2 && !isspace(*p))
+                        ++p;
+                    if (p > pStart && mLen < (int)sizeof(methods) - 2)
+                    {
+                        if (mLen > 0)
+                            methods[mLen++] = '|';
+                        int tokenLen = p - pStart;
+                        if (mLen + tokenLen < (int)sizeof(methods) - 1)
+                        {
+                            memcpy(methods + mLen, pStart, tokenLen);
+                            mLen += tokenLen;
+                        }
+                    }
+                }
+                methods[mLen] = 0;
+
+                // Generate RewriteRule to block non-listed methods
+                char ruleBuf[1024];
+                int rLen = snprintf(ruleBuf, sizeof(ruleBuf),
+                    "RewriteEngine On\n"
+                    "RewriteCond %%{REQUEST_METHOD} !^(%s)$ [NC]\n"
+                    "RewriteRule .* - [F,L]\n", methods);
+                if (rLen > 0 && rLen < (int)sizeof(ruleBuf))
+                    state.rewriteBuf.append(ruleBuf, rLen);
+
+                LS_INFO("[.htaccess] <LimitExcept %.*s> — blocking non-listed "
+                        "methods via rewrite rule", len, pArgs);
+            }
+            state.limitExceptSkip = 1;
+        }
+        else if (strncasecmp(pLine, "<Limit", 6) == 0
+                 && (isspace(pLine[6]) || pLine[6] == '>'))
+        {
+            // <Limit METHOD ...> — apply directives unconditionally (safe)
+            state.inLimitBlock = 1;
+            LS_INFO("[.htaccess] <Limit> block — directives applied to all "
+                    "methods (method-specific scoping not supported): %s",
+                    pLine);
         }
         else if (strncasecmp(pLine, "<Files ", 7) == 0
                  || strncasecmp(pLine, "<Files\t", 7) == 0)
@@ -1468,7 +1741,7 @@ int HtAccessParser::parse(const char *pBuf, int len,
         }
         else if (strncasecmp(pLine, "Require", 7) == 0 && isspace(pLine[7]))
         {
-            handleRequire(state, pLine + 7);
+            handleRequire(state, pTargetCtx, pLine + 7);
         }
         // Access control
         else if (strncasecmp(pLine, "Order", 5) == 0 && isspace(pLine[5]))
@@ -1543,7 +1816,19 @@ int HtAccessParser::parse(const char *pBuf, int len,
         // Header operations
         else if (strncasecmp(pLine, "Header ", 7) == 0)
         {
-            handleHeader(pTargetCtx, pLine, lineLen, state.pLogId);
+            if (state.ifExprActive && state.ifExprEnvVar[0])
+            {
+                // Inside <If> block — append env= condition to header op
+                char condLine[4096];
+                int cLen = snprintf(condLine, sizeof(condLine),
+                    "%.*s env=%s", lineLen, pLine, state.ifExprEnvVar);
+                if (cLen > 0 && cLen < (int)sizeof(condLine))
+                    handleHeader(pTargetCtx, condLine, cLen, state.pLogId);
+                else
+                    handleHeader(pTargetCtx, pLine, lineLen, state.pLogId);
+            }
+            else
+                handleHeader(pTargetCtx, pLine, lineLen, state.pLogId);
         }
         else if (strncasecmp(pLine, "RequestHeader ", 14) == 0)
         {
@@ -1661,16 +1946,67 @@ int HtAccessParser::parse(const char *pBuf, int len,
         {
             // Ignore server-level directive
         }
-        // <If>, <ElseIf>, <Else> — not supported
-        else if (strncasecmp(pLine, "<If ", 4) == 0
-                 || strncasecmp(pLine, "<ElseIf ", 8) == 0
-                 || strncasecmp(pLine, "<Else>", 6) == 0
-                 || strncasecmp(pLine, "</If>", 5) == 0
-                 || strncasecmp(pLine, "</ElseIf>", 9) == 0
-                 || strncasecmp(pLine, "</Else>", 7) == 0)
+        // <If expr> — evaluate expression via RewriteCond, apply headers
+        //              conditionally using env= mechanism
+        else if (strncasecmp(pLine, "<If ", 4) == 0)
         {
-            LS_INFO("[.htaccess] Conditional blocks (<If>/<ElseIf>/<Else>) "
-                    "not supported, ignored: %s", pLine);
+            const char *pExpr = pLine + 4;
+            // Strip trailing >
+            int exprLen = strlen(pExpr);
+            exprLen = trimmedLen(pExpr, exprLen);
+            while (exprLen > 0
+                   && (pExpr[exprLen - 1] == '>' || isspace(pExpr[exprLen - 1])))
+                --exprLen;
+            if (exprLen > 0)
+            {
+                // Generate unique env var name
+                ++state.ifExprCounter;
+                snprintf(state.ifExprEnvVar, sizeof(state.ifExprEnvVar),
+                         "HTA_IF_%d", state.ifExprCounter);
+
+                // Build RewriteCond expr + RewriteRule [E=VAR:1]
+                // Strip surrounding quotes from expression if present
+                const char *pE = pExpr;
+                int eLen = exprLen;
+                if (eLen >= 2
+                    && ((*pE == '"' && pE[eLen - 1] == '"')
+                        || (*pE == '\'' && pE[eLen - 1] == '\'')))
+                {
+                    ++pE;
+                    eLen -= 2;
+                }
+
+                char ruleBuf[2048];
+                int rLen = snprintf(ruleBuf, sizeof(ruleBuf),
+                    "RewriteEngine On\n"
+                    "RewriteCond expr \"%.*s\"\n"
+                    "RewriteRule .* - [E=%s:1]\n",
+                    eLen, pE, state.ifExprEnvVar);
+                if (rLen > 0 && rLen < (int)sizeof(ruleBuf))
+                    state.rewriteBuf.append(ruleBuf, rLen);
+
+                state.ifExprActive = 1;
+                LS_INFO("[.htaccess] <If> block — evaluating expression "
+                        "via rewrite, conditional env=%s: %.*s",
+                        state.ifExprEnvVar, exprLen, pExpr);
+            }
+            else
+            {
+                state.ifBlockSkip = 1;
+                LS_INFO("[.htaccess] <If> block with empty expression, "
+                        "skipping");
+            }
+        }
+        // <ElseIf>, <Else> — skip contents (too complex to convert)
+        else if (strncasecmp(pLine, "<ElseIf ", 8) == 0
+                 || strncasecmp(pLine, "<If>", 4) == 0
+                 || strncasecmp(pLine, "<Else>", 6) == 0)
+        {
+            state.ifExprActive = 0;
+            state.ifExprEnvVar[0] = 0;
+            state.ifBlockSkip = 1;
+            LS_INFO("[.htaccess] <ElseIf>/<Else> blocks not supported, "
+                    "skipping: %s", pLine);
         }
         // <Directory> — not valid in .htaccess, ignore
         else if (strncasecmp(pLine, "<Directory", 10) == 0

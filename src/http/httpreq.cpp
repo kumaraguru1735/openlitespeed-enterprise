@@ -2448,6 +2448,8 @@ int HttpReq::processPath(const char *pURI, int uriLen, char *pBuf,
                     return ret;
                 return LS_FAIL;  //internal redirect
             }
+            if (m_pContext->isAutoIndexOff())
+                return SC_403; //directory listing explicitly disabled
             if (!m_pContext->isAppContext())
                 LS_DBG_L(getLogSession(), "Index file is not available in [%s].",
                          pBuf);
@@ -4020,6 +4022,24 @@ int HttpReq::applyOp(HttpSession *pSession, HttpRespHeaders *pRespHeader,
     }
     else if (!pRespHeader)
         return 0;
+
+    // Check env= condition: only apply if the named env var is set
+    const AutoStr2 *pEnvCond = pOp->getEnv();
+    if (pEnvCond && pEnvCond->len() > 0)
+    {
+        int valLen = 0;
+        const char *pEnvName = pEnvCond->c_str();
+        int negated = 0;
+        if (*pEnvName == '!')
+        {
+            negated = 1;
+            ++pEnvName;
+        }
+        const char *pVal = getEnv(pEnvName, strlen(pEnvName), valLen);
+        int envSet = (pVal != NULL && valLen > 0);
+        if (negated ? envSet : !envSet)
+            return 0;
+    }
 
     if (pOp->getOperator() == LSI_HEADER_UNSET)
     {

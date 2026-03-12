@@ -709,13 +709,14 @@ HttpContext *HttpVHost::bestMatch(const char *pURI, size_t iUriLen)
         if (access(achRealPath, F_OK) != 0)
         {
             pContext0->setConfigBit2(BIT2_NULL_CONTEXT, 1);
+            // Set the real parent so dirMatch() returns the correct
+            // context and processContextRewrite() can walk up to
+            // find parent rewrite rules (e.g. FallbackResource).
+            pContext0->setParent(pContext);
 
             LS_DBG_L(ConfigCtx::getCurConfigCtx(),
                      "path %s not accessible, added null context %p.",
                      achRealPath, pContext0);
-
-
-
 
             break;
         }

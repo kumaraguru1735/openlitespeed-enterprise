@@ -2493,9 +2493,6 @@ int HttpSession::processContextRewrite()
 
     if (!(pContext->rewriteEnabled() & REWRITE_ON))
     {
-        LS_DBG_L(getLogSession(),
-                "[REWRITE] Rewrite engine is not enabled for context '%s'",
-                pContext->getContextURI()->c_str());
         setProcessState(HSPS_HKPT_URI_MAP);
         return 0;
     }

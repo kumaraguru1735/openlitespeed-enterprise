@@ -477,6 +477,8 @@ public:
     void setAutoIndexOff(int a)
     {
         setFeaturesBit(BIT_F_AUTOINDEX_OFF, a);
+        if (a)
+            setFeaturesBit(BIT_F_AUTOINDEX_ON, 0);
         m_iConfigBits |= BIT_AUTOINDEX;
     }
 

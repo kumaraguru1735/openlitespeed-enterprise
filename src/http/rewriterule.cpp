@@ -154,7 +154,7 @@ int RewriteSubstFormat::parse(const char *pFormatStr, const char *pEnd,
             {
                 if (!pMaps)
                 {
-                    HttpLog::parse_error(s_pCurLine,  "No rewrite map defined");
+                    HttpLog::parse_warn(s_pCurLine,  "No rewrite map defined");
                     err = 1;
                     break;
                 }
@@ -295,7 +295,7 @@ int MapRefItem::parse(const char *&pFormatStr, const char *pEnd,
         RewriteMapList::iterator iter = pMaps->find(achName);
         if (iter == pMaps->end())
         {
-            HttpLog::parse_error(s_pCurLine,  "rewrite map is not defined");
+            HttpLog::parse_warn(s_pCurLine,  "rewrite map is not defined");
             return LS_FAIL;
         }
         m_pMap = iter.second();

@@ -383,10 +383,14 @@ int HttpContext::allocateInternal()
 {
     if (!(m_iConfigBits & BIT_CTXINT))
     {
+        CtxInt *pOld = m_pInternal;
         m_pInternal = (CtxInt *)Pool::allocate(sizeof(CtxInt));
         if (!m_pInternal)
             return LS_FAIL;
-        memset((void *) m_pInternal, 0, sizeof(CtxInt));
+        if (pOld)
+            memmove((void *) m_pInternal, (const void *) pOld, sizeof(CtxInt));
+        else
+            memset((void *) m_pInternal, 0, sizeof(CtxInt));
         m_iConfigBits |= BIT_CTXINT;
     }
     return 0;
@@ -1520,6 +1524,23 @@ int HttpContext::htaccessConfigFull(const RewriteMapList *pMapList,
             htaccessPath, bytesRead);
 
     int ret = HtAccessParser::parse(pBuf, bytesRead, this, pMapList);
+
+    // If .htaccess created a context-local MIME map (e.g. via ExpiresByType),
+    // inherit suffix mappings from global/parent so determineMime() can find
+    // per-type settings by file extension.
+    if ((m_iConfigBits & BIT_MIME) && m_pInternal->m_pMIME)
+    {
+        m_pInternal->m_pMIME->inherit(HttpMime::getMime(), 1);
+        if (m_pParent && m_pParent->m_pInternal
+            && m_pParent->m_pInternal->m_pMIME)
+        {
+            m_pInternal->m_pMIME->inherit(m_pParent->m_pInternal->m_pMIME, 0);
+            m_pInternal->m_pMIME->inheritSuffix(
+                m_pParent->m_pInternal->m_pMIME, 1);
+        }
+        m_pInternal->m_pMIME->inheritSuffix(HttpMime::getMime(), 0);
+        m_pInternal->m_pMIME->updateSuffixMimeHandler();
+    }
 
     delete[] pBuf;
     return ret;
