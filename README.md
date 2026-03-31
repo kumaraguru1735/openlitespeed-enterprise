@@ -375,7 +375,7 @@ listener Default {
 | ModSecurity WAF | Yes (sync) | Yes (async) | Yes (async) |
 | ESI (Edge Side Includes) | No | Yes | Yes |
 | Full .htaccess Support | No (rewrite only) | Yes | Yes |
-| .htaccess Auto-Reload | No | Yes | Partial |
+| .htaccess Auto-Reload | No | Yes | Yes (2s poll) |
 | Async SSL Handshake | No | Yes | Yes |
 | WP Brute Force Protection | No | Yes | Yes |
 | JIT VHost Loading | No | Yes | Yes |
