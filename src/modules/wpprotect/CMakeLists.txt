@@ -8,7 +8,7 @@ execute_process( COMMAND getconf LFS_CFLAGS
 
 add_definitions( ${LFS_CFLAGS} )
 
-add_library(mod_wpprotect SHARED
+add_library(mod_wpprotect STATIC
     mod_wpprotect.cpp
 )
 

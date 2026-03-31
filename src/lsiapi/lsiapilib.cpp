@@ -2574,7 +2574,7 @@ static void foreach_req_var_full(HttpSession *pSession,
     char sVer[40];
     n = snprintf(sVer, 40, "LiteSpeed Enterprise %s", PACKAGE_VERSION);
     cb(-1, "LSWS_EDITION", 12, sVer, n, arg);
-    cb(-1, "X-LSCACHE", 9, "1", 1, arg);
+    cb(-1, "X-LSCACHE", 9, "on,crawler", 10, arg);
 
     const AutoStr2 *psTemp = pReq->getRealPath();
     if (psTemp)

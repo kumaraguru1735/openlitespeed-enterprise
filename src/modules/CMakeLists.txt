@@ -39,6 +39,8 @@ if (MOD_SECURITY)
     add_subdirectory(modsecurity-ls)
 endif()
 
+add_subdirectory(wpprotect)
+
 if (MOD_REDISVHOST)
     message("Make mod_redisvhost")
     add_subdirectory(redisvhost)

@@ -31,6 +31,7 @@ OPTION(MOD_REQPARSER "Whether modreqparser should be built" OFF)
 OPTION(MOD_INSPECTOR "Whether modinspector should be built" OFF)
 OPTION(MOD_UPLOADPROGRESS "Whether uploadprogress should be built" OFF)
 OPTION(MOD_LSPHP "Whether mod_lsphp should be built" OFF)
+OPTION(MOD_REDISVHOST "Whether Redis dynamic vhost module should be built" OFF)
 
 include_directories( BEFORE  include src/lshpack src/liblsquic/ls-qpack ${PROJECT_SOURCE_DIR}/../third-party/include/)
 link_directories( ${PROJECT_SOURCE_DIR}/../third-party/lib/)
