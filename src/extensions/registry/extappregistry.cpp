@@ -41,6 +41,8 @@
 #include <extensions/fcgi/fcgiapp.h>
 #include <extensions/jk/jworker.h>
 #include <extensions/lsapi/lsapiworker.h>
+#include <extensions/lsapi/lsapiconfig.h>
+#include <extensions/lsapi/lsapidaemon.h>
 #include <extensions/proxy/proxyconfig.h>
 #include <extensions/proxy/proxyworker.h>
 #include <unistd.h>
@@ -345,6 +347,9 @@ int ExtAppRegistry::stopApp(ExtWorker *pApp)
 
 int ExtAppRegistry::stopAll()
 {
+    // Shut down all LSAPI daemon processes first
+    LsapiDaemon::shutdownAll();
+
     for (int i = 0; i < EA_NUM_APP; ++i)
         s_registry[i]()->stopAllWorkers();
     return 0;
@@ -580,6 +585,30 @@ int ExtAppRegistry::configVhostOwnPhp(HttpVHost *pVHost)
             config.setPhpHandler(1);
             config.config(pNode);
             config.setUGid(pVHost->getUid(), pVHost->getGid());
+
+            // Parse LSAPI daemon mode config for PHP handlers
+            LsapiConfig *pLsapiConfig = dynamic_cast<LsapiConfig *>(&config);
+            if (pLsapiConfig)
+            {
+                int daemonMode = ConfigCtx::getCurConfigCtx()->getLongValue(
+                    pNode, "lsapiDaemonMode", 0, 2, LSAPI_DAEMON_OFF);
+                if (daemonMode != LSAPI_DAEMON_OFF)
+                {
+                    pLsapiConfig->setDaemonMode(daemonMode);
+                    pLsapiConfig->setDaemonMaxChildren(
+                        ConfigCtx::getCurConfigCtx()->getLongValue(
+                            pNode, "lsapiMaxChildren", 1, 1000,
+                            LSAPI_DAEMON_MAX_CHILDREN));
+                    pLsapiConfig->setDaemonMaxIdleTime(
+                        ConfigCtx::getCurConfigCtx()->getLongValue(
+                            pNode, "lsapiMaxIdleTime", 10, 86400,
+                            LSAPI_DAEMON_MAX_IDLE_TIME));
+                    pLsapiConfig->setDaemonMaxReqs(
+                        ConfigCtx::getCurConfigCtx()->getLongValue(
+                            pNode, "lsapiMaxReqs", 1, 1000000,
+                            LSAPI_DAEMON_MAX_REQS));
+                }
+            }
         }
     }
 
@@ -953,6 +982,40 @@ ExtWorker *ExtAppRegistry::configExtApp(const XmlNode *pNode, const HttpVHost *p
         config.setPhpHandler(iType == EA_LSAPI);
         config.config(pNode);
         config.configExtAppUserGroup(pNode, iType, achName, sizeof(achName));
+
+        // Parse LSAPI daemon/processgroup mode config
+        if (iType == EA_LSAPI)
+        {
+            LsapiConfig *pLsapiConfig = dynamic_cast<LsapiConfig *>(&config);
+            if (pLsapiConfig)
+            {
+                int daemonMode = ConfigCtx::getCurConfigCtx()->getLongValue(
+                    pNode, "lsapiDaemonMode", 0, 2, LSAPI_DAEMON_OFF);
+                int maxChildren = ConfigCtx::getCurConfigCtx()->getLongValue(
+                    pNode, "lsapiMaxChildren", 1, 1000,
+                    LSAPI_DAEMON_MAX_CHILDREN);
+                int maxIdleTime = ConfigCtx::getCurConfigCtx()->getLongValue(
+                    pNode, "lsapiMaxIdleTime", 10, 86400,
+                    LSAPI_DAEMON_MAX_IDLE_TIME);
+                int maxReqs = ConfigCtx::getCurConfigCtx()->getLongValue(
+                    pNode, "lsapiMaxReqs", 1, 1000000,
+                    LSAPI_DAEMON_MAX_REQS);
+
+                pLsapiConfig->setDaemonMode(daemonMode);
+                pLsapiConfig->setDaemonMaxChildren(maxChildren);
+                pLsapiConfig->setDaemonMaxIdleTime(maxIdleTime);
+                pLsapiConfig->setDaemonMaxReqs(maxReqs);
+
+                if (daemonMode != LSAPI_DAEMON_OFF)
+                {
+                    LS_NOTICE(&currentCtx,
+                              "LSAPI Daemon mode %d enabled for [%s]: "
+                              "maxChildren=%d, maxIdleTime=%d, maxReqs=%d",
+                              daemonMode, pName, maxChildren,
+                              maxIdleTime, maxReqs);
+                }
+            }
+        }
 
         if (config.isDetached())
         {

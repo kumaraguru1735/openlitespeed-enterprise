@@ -335,6 +335,8 @@ static int hasWpAdminCookie(lsi_session_t *session)
     const char *needle = "wordpress_logged_in_";
     const int needleLen = 20;
 
+    if (cookieLen < needleLen)
+        return 0;
     for (int i = 0; i <= cookieLen - needleLen; ++i)
     {
         if (memcmp(cookies + i, needle, needleLen) == 0)
@@ -358,6 +360,8 @@ static int hasCaptchaVerifiedCookie(lsi_session_t *session)
     const char *needle = WP_PROTECT_COOKIE_NAME "=";
     const int needleLen = WP_PROTECT_COOKIE_LEN + 1;
 
+    if (cookieLen < needleLen)
+        return 0;
     for (int i = 0; i <= cookieLen - needleLen; ++i)
     {
         if (memcmp(cookies + i, needle, needleLen) == 0)
@@ -483,7 +487,26 @@ static int sendCaptchaPage(lsi_session_t *session, const WpProtectConfig *pConfi
                            "text/html", 9, LSI_HEADEROP_SET);
 
     g_api->append_resp_body(session, htmlPart1, strlen(htmlPart1));
-    g_api->append_resp_body(session, pConfig->siteKey, strlen(pConfig->siteKey));
+
+    /* HTML-escape the siteKey to prevent XSS via config injection */
+    const char *src = pConfig->siteKey;
+    char escaped[1024];
+    int eLen = 0;
+    for (int j = 0; src[j] && eLen < (int)sizeof(escaped) - 8; ++j)
+    {
+        switch (src[j])
+        {
+        case '"':  memcpy(escaped + eLen, "&quot;", 6); eLen += 6; break;
+        case '&':  memcpy(escaped + eLen, "&amp;",  5); eLen += 5; break;
+        case '<':  memcpy(escaped + eLen, "&lt;",   4); eLen += 4; break;
+        case '>':  memcpy(escaped + eLen, "&gt;",   4); eLen += 4; break;
+        case '\'': memcpy(escaped + eLen, "&#39;",  5); eLen += 5; break;
+        default:   escaped[eLen++] = src[j]; break;
+        }
+    }
+    escaped[eLen] = '\0';
+    g_api->append_resp_body(session, escaped, eLen);
+
     g_api->append_resp_body(session, htmlPart2, strlen(htmlPart2));
     g_api->end_resp(session);
 

@@ -24,12 +24,32 @@
 
 class LsapiConfig : public LocalWorkerConfig
 {
+    int     m_iDaemonMode;      // 0=off, 1=daemon, 2=processgroup
+    int     m_iDaemonMaxChildren;
+    int     m_iDaemonMaxIdleTime;
+    int     m_iDaemonMaxReqs;
 
 public:
     explicit LsapiConfig(const char *pName);
     LsapiConfig();
 
     ~LsapiConfig();
+
+    // Daemon/ProcessGroup mode accessors
+    int getDaemonMode() const           {   return m_iDaemonMode;           }
+    void setDaemonMode(int mode)        {   m_iDaemonMode = mode;           }
+
+    int getDaemonMaxChildren() const    {   return m_iDaemonMaxChildren;    }
+    void setDaemonMaxChildren(int n)    {   m_iDaemonMaxChildren = n;       }
+
+    int getDaemonMaxIdleTime() const    {   return m_iDaemonMaxIdleTime;    }
+    void setDaemonMaxIdleTime(int s)    {   m_iDaemonMaxIdleTime = s;       }
+
+    int getDaemonMaxReqs() const        {   return m_iDaemonMaxReqs;        }
+    void setDaemonMaxReqs(int n)        {   m_iDaemonMaxReqs = n;           }
+
+    int isDaemonEnabled() const
+    {   return m_iDaemonMode != 0;  }
 };
 
 #endif

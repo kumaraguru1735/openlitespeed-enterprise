@@ -921,7 +921,7 @@ int VHostMap::zconfAppendDomainMap(AutoBuf *pBuf, char isSsl)
     return 1;
 }
 
-HttpVHost *VHostMap::jitLoadVHost(const char *pHost) const
+HttpVHost *VHostMap::jitLoadVHost(const char *pHost)
 {
     if (!m_pJitVHostMap || !m_pJitVHostMap->isEnabled())
         return NULL;
@@ -930,9 +930,9 @@ HttpVHost *VHostMap::jitLoadVHost(const char *pHost) const
     if (pVHost)
     {
         LS_DBG_L("JIT VHost: loaded vhost for domain [%s] on demand", pHost);
-        // The vhost has been added to the server's vhost map and listener
-        // mappings by the JIT loader, so on subsequent requests the normal
-        // hash lookup path will find it.
+        // Cache in this VHostMap so subsequent requests use the normal
+        // hash lookup path and do not re-trigger JIT loading.
+        addMaping(pVHost, pHost);
     }
     return pVHost;
 }

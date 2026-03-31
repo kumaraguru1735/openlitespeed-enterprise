@@ -113,7 +113,7 @@ private:
 
     static WorkCrew        *s_pWorkCrew;
     static ls_lfqueue_t    *s_pFinishedQueue;
-    static int              s_iEnabled;
+    static volatile int     s_iEnabled;
 
     LS_NO_COPY_ASSIGN(SslAsyncHandshake);
 };

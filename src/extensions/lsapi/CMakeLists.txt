@@ -8,6 +8,7 @@ SET(lsapi_STAT_SRCS
    lsapireq.cpp
    lsapiconn.cpp
    lsapiconfig.cpp
+   lsapidaemon.cpp
 )
 
 add_library(lsapi STATIC ${lsapi_STAT_SRCS})

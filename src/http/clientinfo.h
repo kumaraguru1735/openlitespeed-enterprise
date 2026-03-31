@@ -49,8 +49,9 @@ enum BOT_REASON
 #define CIF_CAPTCHA_PENDING (1<<5)
 #define CIF_TEST_LOCAL_ADDR (1<<6)
 #define CIF_LOCAL_ADDR      (1<<7)
-#define CIF_DISABLE_HTTP2   (1<<8)
-#define CIF_PROTOCOL_PROXY  (1<<9)
+#define CIF_DISABLE_HTTP2       (1<<8)
+#define CIF_PROTOCOL_PROXY      (1<<9)
+#define CIF_DDOS_CAPTCHA_REQ    (1<<10)
 
 #if 0
 #include <shm/lsshmcache.h>
@@ -109,6 +110,7 @@ class ClientInfo
     static int          s_iOverLimitGracePeriod;
     static int          s_iBanPeriod;
     static uint16_t     s_iMaxAllowedBotHits;
+    static int          s_iAntiDdosCaptcha;
     //time_t
     //int       m_iBadReqs;
     //int       m_iGoodReqs;
@@ -250,6 +252,18 @@ public:
     {   s_iMaxAllowedBotHits = h;       }
     static uint16_t getMaxAllowedBotHits()
     {   return s_iMaxAllowedBotHits;    }
+
+    static void setAntiDdosCaptcha(int val)
+    {   s_iAntiDdosCaptcha = val;       }
+    static int getAntiDdosCaptcha()
+    {   return s_iAntiDdosCaptcha;      }
+
+    bool isDdosCaptchaRequired() const
+    {   return isFlagSet(CIF_DDOS_CAPTCHA_REQ); }
+    void setDdosCaptchaRequired()
+    {   setFlag(CIF_DDOS_CAPTCHA_REQ);  }
+    void clearDdosCaptchaRequired()
+    {   clearFlag(CIF_DDOS_CAPTCHA_REQ); }
 
 #if 0
     TShmClient *getShmClientInfo()

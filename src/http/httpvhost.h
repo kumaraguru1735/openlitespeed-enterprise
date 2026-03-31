@@ -29,6 +29,7 @@
 #include <lsiapi/lsimoduledata.h>
 
 #include <util/hashstringmap.h>
+#include <lsr/ls_atomic.h>
 #include <util/refcounter.h>
 #include <util/stringlist.h>
 
@@ -178,6 +179,9 @@ private:
     LOG4CXX_NS::Appender *m_pBytesLog;
 
     ThrottleLimits      m_throttle;
+
+    int                 m_iVhBwLimit;       // aggregate vhost bandwidth limit (bytes/sec), 0 = unlimited
+    volatile int        m_iVhBwAvail;       // remaining aggregate bandwidth quota this period
 
     int16_t             m_iMaxKeepAliveRequests;
     char                m_iRewriteLogLevel;
@@ -427,6 +431,28 @@ public:
     ThrottleLimits *getThrottleLimits()    {   return &m_throttle;     }
     const ThrottleLimits *getThrottleLimits() const
     {   return &m_throttle;         }
+
+    void setVhBandwidthLimit(int bytesPerSec)
+    {
+        m_iVhBwLimit = (bytesPerSec > 0) ? bytesPerSec : 0;
+        m_iVhBwAvail = m_iVhBwLimit;
+    }
+    int  getVhBandwidthLimit() const    {   return m_iVhBwLimit;        }
+    bool isVhBwUnlimited() const        {   return m_iVhBwLimit <= 0;   }
+
+    int  getVhBwAvail() const
+    {   return ls_atomic_value(const_cast<volatile int *>(&m_iVhBwAvail));   }
+
+    void useVhBwQuota(int bytes)
+    {   ls_atomic_fetch_sub(&m_iVhBwAvail, bytes);  }
+
+    bool allowVhBw() const
+    {   return (m_iVhBwLimit <= 0)
+            || (ls_atomic_value(const_cast<volatile int *>(&m_iVhBwAvail)) > 0); }
+
+    void resetVhBwQuota()
+    {   if (m_iVhBwLimit > 0)
+            ls_atomic_setint(&m_iVhBwAvail, m_iVhBwLimit);  }
 
     char getRewriteLogLevel() const     {   return m_iRewriteLogLevel;  }
     void setRewriteLogLevel(int l)    {   m_iRewriteLogLevel = l;     }

@@ -16,15 +16,24 @@
 *    along with this program. If not, see http://www.gnu.org/licenses/.      *
 *****************************************************************************/
 #include "lsapiconfig.h"
+#include "lsapidaemon.h"
 
 LsapiConfig::LsapiConfig(const char *pName)
     : LocalWorkerConfig(pName)
+    , m_iDaemonMode(LSAPI_DAEMON_OFF)
+    , m_iDaemonMaxChildren(LSAPI_DAEMON_MAX_CHILDREN)
+    , m_iDaemonMaxIdleTime(LSAPI_DAEMON_MAX_IDLE_TIME)
+    , m_iDaemonMaxReqs(LSAPI_DAEMON_MAX_REQS)
 {
 
 }
 
 
 LsapiConfig::LsapiConfig()
+    : m_iDaemonMode(LSAPI_DAEMON_OFF)
+    , m_iDaemonMaxChildren(LSAPI_DAEMON_MAX_CHILDREN)
+    , m_iDaemonMaxIdleTime(LSAPI_DAEMON_MAX_IDLE_TIME)
+    , m_iDaemonMaxReqs(LSAPI_DAEMON_MAX_REQS)
 {
 }
 
@@ -32,5 +41,3 @@ LsapiConfig::LsapiConfig()
 LsapiConfig::~LsapiConfig()
 {
 }
-
-

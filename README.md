@@ -23,6 +23,323 @@ Stock OpenLiteSpeed lacks several features that are essential for production sha
 | Dynamic virtual hosting | File-based config only | Redis-backed mass hosting |
 | ModSecurity WAF | Synchronous processing | Async thread pool offloading |
 | CPU affinity | Basic auto-detect | Configurable per-core pinning |
+| VHost bandwidth throttling | Not available | Per-vhost aggregate bandwidth limits |
+| Anti-DDoS with reCAPTCHA | Separate systems | Integrated escalation pipeline |
+| LSAPI Daemon Mode | Not available | Persistent PHP processes per user |
+
+---
+
+## Installation
+
+### Method 1: Build from Source (Recommended)
+
+#### Prerequisites
+
+```bash
+# Ubuntu/Debian 20.04+
+sudo apt-get update
+sudo apt-get install -y build-essential cmake git libssl-dev libpcre3-dev \
+    zlib1g-dev libxml2-dev libgeoip-dev libhiredis-dev libmodsecurity-dev \
+    libbrotli-dev
+
+# CentOS/RHEL 8+
+sudo dnf install -y gcc gcc-c++ cmake git openssl-devel pcre-devel zlib-devel \
+    libxml2-devel GeoIP-devel hiredis-devel libmodsecurity-devel brotli-devel
+
+# AlmaLinux / Rocky Linux 9
+sudo dnf install -y epel-release
+sudo dnf install -y gcc gcc-c++ cmake git openssl-devel pcre-devel zlib-devel \
+    libxml2-devel hiredis-devel brotli-devel
+```
+
+#### Clone and Build
+
+```bash
+git clone https://github.com/kumaraguru1735/openlitespeed-enterprise.git
+cd openlitespeed-enterprise
+
+# Create build directory
+mkdir build && cd build
+
+# Configure
+cmake .. \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DMOD_SECURITY=ON \
+    -DCMAKE_INSTALL_PREFIX=/usr/local/lsws
+
+# Build (use all available cores)
+make -j$(nproc)
+
+# Install
+sudo make install
+```
+
+#### Post-Install Setup
+
+```bash
+# Create the admin user for WebAdmin console
+sudo /usr/local/lsws/admin/misc/admpass.sh
+
+# Create required directories
+sudo mkdir -p /usr/local/lsws/logs
+sudo mkdir -p /usr/local/lsws/conf/vhosts
+sudo mkdir -p /tmp/lshttpd
+
+# Set permissions
+sudo chown -R lsadm:lsadm /usr/local/lsws/conf
+sudo chmod 750 /usr/local/lsws/conf
+
+# Start the server
+sudo /usr/local/lsws/bin/lswsctrl start
+
+# Verify it's running
+curl -I http://localhost:8088
+```
+
+### Method 2: Replace Existing OpenLiteSpeed
+
+If you already have OLS installed:
+
+```bash
+# Stop the existing server
+sudo /usr/local/lsws/bin/lswsctrl stop
+
+# Backup current installation
+sudo cp -a /usr/local/lsws /usr/local/lsws.backup
+
+# Clone and build
+git clone https://github.com/kumaraguru1735/openlitespeed-enterprise.git
+cd openlitespeed-enterprise
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release -DMOD_SECURITY=ON \
+    -DCMAKE_INSTALL_PREFIX=/usr/local/lsws
+make -j$(nproc)
+
+# Install (preserves existing configs)
+sudo make install
+
+# Restart
+sudo /usr/local/lsws/bin/lswsctrl start
+```
+
+### Build Options
+
+| CMake Option | Default | Description |
+|-------------|---------|-------------|
+| `MOD_SECURITY` | ON | Build ModSecurity WAF module |
+| `MOD_PAGESPEED` | OFF | Build Google PageSpeed module (Linux x64 only) |
+| `MOD_LUA` | OFF | Build Lua scripting module (Linux x64) |
+| `MOD_REDISVHOST` | AUTO | Build Redis VHost module (auto-detects hiredis) |
+
+### Optional Dependencies
+
+| Library | Package | Required For |
+|---------|---------|-------------|
+| hiredis | `libhiredis-dev` | Redis Dynamic VHost module |
+| libmodsecurity | `libmodsecurity-dev` | ModSecurity WAF module |
+| brotli | `libbrotli-dev` | Brotli compression |
+| GeoIP | `libgeoip-dev` | GeoIP-based access control |
+
+---
+
+## Usage Guide
+
+### Server Management
+
+```bash
+# Start server
+sudo /usr/local/lsws/bin/lswsctrl start
+
+# Stop server
+sudo /usr/local/lsws/bin/lswsctrl stop
+
+# Graceful restart (zero-downtime)
+sudo /usr/local/lsws/bin/lswsctrl restart
+
+# Check status
+sudo /usr/local/lsws/bin/lswsctrl status
+
+# Access WebAdmin console (default port 7080)
+# https://your-server-ip:7080
+```
+
+### Configuration Files
+
+| File | Purpose |
+|------|---------|
+| `/usr/local/lsws/conf/httpd_config.conf` | Main server configuration |
+| `/usr/local/lsws/conf/vhosts/*/vhconf.conf` | Per-vhost configuration |
+| `/usr/local/lsws/admin/conf/admin_config.conf` | WebAdmin console config |
+| `/usr/local/lsws/logs/error.log` | Server error log |
+| `/usr/local/lsws/logs/access.log` | Access log |
+
+### Full Configuration Example
+
+```apacheconf
+# /usr/local/lsws/conf/httpd_config.conf
+
+serverName                LiteSpeed Enterprise
+user                      nobody
+group                     nogroup
+priority                  0
+autoRestart               1
+chrootPath                /
+enableChroot              0
+inMemBufSize              60M
+swappingDir               /tmp/lshttpd/swap
+
+# Enterprise: Async SSL for better HTTPS performance
+sslAsyncHandshake         1
+
+# Enterprise: Auto CPU core pinning
+cpuAffinityMode           1
+
+# Enterprise: Load vhosts on first request (faster startup)
+jitVHost                  1
+
+# Enterprise: Anti-DDoS with reCAPTCHA escalation
+antiDdosCaptcha           1
+
+# Tuning
+maxConnections            10000
+maxSSLConnections         10000
+connTimeout               300
+maxKeepAliveReq           10000
+keepAliveTimeout          5
+sndBufSize                0
+rcvBufSize                0
+
+# Logging
+errorlog /usr/local/lsws/logs/error.log {
+    logLevel              WARN
+    debugLevel            0
+    rollingSize           10M
+    enableStderrLog       1
+}
+
+accesslog /usr/local/lsws/logs/access.log {
+    rollingSize           10M
+    keepDays              30
+    compressArchive       0
+}
+
+# Enterprise: WordPress Brute Force Protection
+module mod_wpprotect {
+    wpProtect             1
+    wpProtectMaxRetry     5
+    wpProtectLockout      300
+    wpProtectAction       1
+    recaptchaSiteKey      YOUR_RECAPTCHA_SITE_KEY
+    recaptchaSecretKey    YOUR_RECAPTCHA_SECRET_KEY
+}
+
+# Enterprise: Async ModSecurity WAF
+module mod_security {
+    modsecurity           1
+    modsecurity_rules_file /etc/modsecurity/owasp-crs/main.conf
+    modsecAsync           1
+}
+
+# Enterprise: Redis-backed dynamic virtual hosting
+module mod_redisvhost {
+    redisVHostEnable      1
+    redisVHostServer      127.0.0.1:6379
+    redisVHostTTL         300
+    redisVHostKeyPrefix   vhost:
+}
+
+# Listeners
+listener HTTP {
+    address               *:80
+    secure                0
+}
+
+listener HTTPS {
+    address               *:443
+    secure                1
+    keyFile               /etc/ssl/private/server.key
+    certFile              /etc/ssl/certs/server.crt
+}
+
+# Virtual Host example
+virtualhost example.com {
+    vhRoot                /var/www/example.com
+    configFile            conf/vhosts/example.com/vhconf.conf
+    allowSymbolLink       1
+    enableScript          1
+    restrained            1
+
+    # Enterprise: Per-vhost bandwidth limit (10 MB/s)
+    vhBandwidthLimit      10485760
+}
+```
+
+### Per-VHost Configuration
+
+```apacheconf
+# /usr/local/lsws/conf/vhosts/example.com/vhconf.conf
+
+docRoot                   $VH_ROOT/public_html
+enableGzip                1
+enableBr                  1
+
+index {
+    useServer             0
+    indexFiles            index.php, index.html
+}
+
+# LSAPI PHP Handler with Enterprise Daemon Mode
+extprocessor lsphp {
+    type                  lsapi
+    address               uds://tmp/lshttpd/lsphp_example.sock
+    maxConns              10
+    env                   PHP_LSAPI_CHILDREN=10
+    env                   LSAPI_PGRP_MAX_IDLE=300
+    initTimeout           60
+    retryTimeout          0
+    persistConn           1
+    respBuffer            0
+    autoStart             2
+    path                  /usr/local/lsws/lsphp81/bin/lsphp
+    backlog               100
+    instances             1
+    priority              0
+    memSoftLimit          2047M
+    memHardLimit          2047M
+    procSoftLimit         1400
+    procHardLimit         1500
+
+    # Enterprise: Daemon mode for persistent PHP processes
+    lsapiDaemonMode       1
+    lsapiMaxChildren      5
+    lsapiMaxIdleTime      300
+    lsapiMaxReqs          10000
+}
+
+scripthandler {
+    add                   lsapi:lsphp php
+}
+
+# .htaccess support (auto-detected, no config needed)
+# Full Apache-compatible .htaccess is parsed automatically
+# Changes are detected every 2 seconds without restart
+
+# Rewrite rules
+rewrite {
+    enable                1
+    autoLoadHtaccess      1
+}
+
+# ESI is auto-activated via response header:
+#   X-LiteSpeed-Cache-Control: esi=on
+# No additional config needed
+
+# Access log
+accesslog /var/www/example.com/logs/access.log {
+    rollingSize           10M
+    keepDays              30
+}
+```
 
 ---
 
@@ -30,7 +347,7 @@ Stock OpenLiteSpeed lacks several features that are essential for production sha
 
 ### 1. Full Apache-Compatible .htaccess Support
 
-The most significant limitation of stock OLS for shared hosting is its minimal .htaccess support. This fork includes a comprehensive .htaccess parser (~2,200 lines) that supports the vast majority of Apache directives users rely on.
+Comprehensive .htaccess parser (~2,200 lines) with **automatic change detection** (2-second poll interval, no restart needed).
 
 **Supported Directives:**
 
@@ -46,322 +363,77 @@ The most significant limitation of stock OLS for shared hosting is its minimal .
 - **Conditional Blocks**: `<IfModule>`, `<IfDefine>`, `<Files>`, `<FilesMatch>`, `<If>`, `<Limit>`, `<LimitExcept>`
 - **PHP Configuration**: `php_value`, `php_flag` (blocks `php_admin_value`/`php_admin_flag` for security)
 
-**Credits:** .htaccess parser originally developed by [Cloudment/Vectra](https://github.com/Cloudment/Vectra).
-
----
-
 ### 2. ESI (Edge Side Includes) Module
 
-ESI enables partial page caching by allowing you to cache the majority of a page while punching holes for dynamic fragments. This is essential for ecommerce platforms like Magento (LiteMage) and any site with user-specific content embedded in otherwise cacheable pages.
+Fragment caching for ecommerce and dynamic sites. Activated per-response via `X-LiteSpeed-Cache-Control: esi=on` or `Surrogate-Control: ESI/1.0`.
 
-**Supported Tags:**
-- `<esi:include src="/fragment.html" alt="/fallback.html" onerror="continue" />`
-- `<esi:remove>...</esi:remove>`
-- `<esi:comment text="..." />`
-- `<esi:try><esi:attempt>...</esi:attempt><esi:except>...</esi:except></esi:try>`
-
-**Activation:**
-
-ESI processing is triggered per-response when the backend sends either:
-```
-X-LiteSpeed-Cache-Control: esi=on
-```
-or:
-```
-Surrogate-Control: content="ESI/1.0"
-```
-
-**How It Works:**
-1. The module hooks into the response processing pipeline
-2. When the activation header is detected, it buffers the response body
-3. Parses all ESI tags using a streaming parser
-4. Fetches `<esi:include>` fragments via internal loopback HTTP requests
-5. Assembles the final response with fragments inlined
-6. Supports `alt` URLs as fallbacks and `onerror="continue"` for graceful degradation
-
-**Limits:**
-- Max response body for ESI processing: 8 MB
-- Max fragment size: 2 MB
-- Max recursion depth: 5 levels
-- Fragment fetch timeout: 5 seconds
-
-**Configuration:** The module is prelinked and activates automatically when the response header is present. No additional configuration required.
-
----
+**Supported Tags:** `<esi:include>`, `<esi:remove>`, `<esi:comment>`, `<esi:try>`/`<esi:attempt>`/`<esi:except>`
 
 ### 3. Async SSL Handshake Offloading
 
-TLS handshakes involve CPU-intensive cryptographic operations (RSA/ECDSA key exchange, certificate verification). In stock OLS, these block the main event loop, reducing throughput under heavy HTTPS load.
-
-This feature offloads SSL handshakes to a dedicated worker thread pool, freeing the event loop to continue processing other connections.
-
-**Configuration:**
-```
-sslAsyncHandshake    1
-```
-
-**How It Works:**
-1. When a new SSL connection arrives, the handshake is queued to the thread pool
-2. The event loop suspends I/O on that connection and continues processing others
-3. A worker thread performs `SSL_do_handshake()` (the expensive crypto operation)
-4. On completion, the event loop is notified via `EvtcbQue` and the connection resumes
-5. If queueing fails, falls back to synchronous handshake transparently
-
-**Thread Pool:** 2-16 worker threads (default: 4), configurable.
-
----
+Config: `sslAsyncHandshake 1` -- offloads TLS handshakes to worker threads, freeing the event loop.
 
 ### 4. WordPress Brute Force Protection
 
-Built-in protection against brute force attacks on WordPress login endpoints, without requiring any WordPress plugins.
+Config: `wpProtect 1` -- monitors `/wp-login.php` and `/xmlrpc.php`, rate-limits per IP with reCAPTCHA challenge.
 
-**Protected Endpoints:**
-- `POST /wp-login.php`
-- `POST /xmlrpc.php`
+### 5. Just-In-Time VHost Loading
 
-**Features:**
-- Per-IP attempt tracking using shared memory (works across all worker processes)
-- Configurable threshold and lockout duration
-- Two blocking modes: flat deny (403) or reCAPTCHA challenge
-- Automatic whitelisting of logged-in admins (via `wordpress_logged_in_*` cookie)
-- Periodic cleanup of expired records (every 60 seconds)
-- Capacity: 4,096 concurrent tracked IPs with LRU eviction
+Config: `jitVHost 1` -- defers vhost config parsing until first request, dramatically reducing startup time.
 
-**Configuration:**
-```
-module mod_wpprotect {
-    wpProtect              1
-    wpProtectMaxRetry      5
-    wpProtectLockout       300
-    wpProtectAction        1
-    recaptchaSiteKey       YOUR_SITE_KEY
-    recaptchaSecretKey     YOUR_SECRET_KEY
-}
-```
+### 6. Redis Dynamic Virtual Hosting
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `wpProtect` | `0` | Enable/disable (0 or 1) |
-| `wpProtectMaxRetry` | `5` | Max POST attempts before lockout |
-| `wpProtectLockout` | `300` | Lockout duration in seconds |
-| `wpProtectAction` | `1` | 0 = flat 403 deny, 1 = reCAPTCHA challenge |
-| `recaptchaSiteKey` | `""` | Google reCAPTCHA v2 site key |
-| `recaptchaSecretKey` | `""` | Google reCAPTCHA v2 secret key |
+Config: `redisVHostEnable 1` -- looks up vhost config from Redis for mass hosting without restarts.
 
-**reCAPTCHA Flow:**
-1. User exceeds attempt threshold
-2. Server responds with a styled 403 page containing a reCAPTCHA widget
-3. User completes the challenge, which sets a verification cookie
-4. Subsequent requests with the cookie are allowed and the IP's counter is reset
+### 7. Async ModSecurity WAF
 
----
-
-### 5. Just-In-Time VHost Configuration Loading
-
-For servers with hundreds or thousands of virtual hosts, loading all vhost configs at startup significantly increases restart time and memory usage. JIT loading defers config parsing until the first request for each domain.
-
-**Configuration:**
-```
-jitVHost    1
-```
-
-**How It Works:**
-1. At startup, the server registers lightweight domain-to-config-path mappings instead of parsing full vhost configs
-2. When a request arrives for a domain whose vhost hasn't been loaded, `JitVHostMap::loadVHost()` is triggered
-3. The config file is parsed, the `HttpVHost` is created, and it's added to the server's vhost map
-4. Subsequent requests for the same domain use the cached vhost (no re-parsing)
-
-**Thread Safety:** Uses mutex with double-checked locking to prevent concurrent loads of the same vhost.
-
-**Startup Impact:** For a server with 500 vhosts where only 50 are active, JIT loading means the server starts in a fraction of the time and only uses memory for the 50 active vhosts.
-
----
-
-### 6. Redis-Backed Dynamic Virtual Hosting
-
-For mass hosting environments, managing thousands of vhost config files becomes impractical. This module looks up vhost configuration from Redis, enabling dynamic provisioning without server restarts.
-
-**Configuration:**
-```
-module mod_redisvhost {
-    redisVHostEnable       1
-    redisVHostServer       127.0.0.1:6379
-    redisVHostPassword     your_password
-    redisVHostTTL          300
-    redisVHostKeyPrefix    vhost:
-}
-```
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `redisVHostEnable` | `0` | Enable/disable |
-| `redisVHostServer` | `127.0.0.1:6379` | Redis server host:port |
-| `redisVHostPassword` | `""` | Redis AUTH password |
-| `redisVHostTTL` | `300` | In-memory cache TTL (seconds) |
-| `redisVHostKeyPrefix` | `vhost:` | Redis key prefix |
-
-**Redis Key Format:**
-```
-SET vhost:example.com '{
-    "docRoot":    "/var/www/example.com/public_html",
-    "phpVersion": "lsphp81",
-    "accessLog":  "/var/log/ols/example.com-access.log",
-    "errorLog":   "/var/log/ols/example.com-error.log",
-    "aliases":    "www.example.com",
-    "uid":        1001,
-    "gid":        1001,
-    "sslCert":    "/etc/ssl/certs/example.com.crt",
-    "sslKey":     "/etc/ssl/private/example.com.key"
-}'
-```
-
-**Features:**
-- In-memory cache (256-bucket hash table) to minimize Redis queries
-- Automatic reconnection with configurable backoff (5-second cooldown)
-- `www.` prefix stripping for domain normalization
-- Sets environment variables (`REDIS_VHOST_DOCROOT`, `REDIS_VHOST_PHPVER`, etc.) for use by rewrite rules
-- Validates docRoot directory exists before applying
-- Falls through to file-based config if Redis lookup fails
-
-**Dependency:** Requires `hiredis` library. The build system gracefully skips the module if hiredis is not installed.
-
----
-
-### 7. Async ModSecurity WAF Processing
-
-Stock OLS runs ModSecurity rule evaluation synchronously, blocking the request while rules are checked. For complex rulesets (OWASP CRS with 100+ rules), this adds measurable latency.
-
-This enhancement offloads ModSecurity evaluation to a worker thread pool, allowing the event loop to continue processing other requests while WAF rules are evaluated.
-
-**Configuration:**
-```
-module mod_security {
-    modsecurity                 1
-    modsecurity_rules_file      /etc/modsecurity/main.conf
-    modsecAsync                 1
-}
-```
-
-**How It Works:**
-1. At the URI_MAP hook, if async is enabled, the module snapshots all request metadata (headers, method, URI, client IP, etc.)
-2. The snapshot is queued to a 4-thread WorkCrew pool
-3. The HTTP session returns `LSI_SUSPEND`, freeing the event loop
-4. The worker thread creates a ModSecurity transaction and runs phases 1-3
-5. Results (allow/deny/redirect) are stored in the session's `ModData`
-6. The worker signals the event loop via `g_api->create_session_resume_event()`
-7. On resume, the URI_MAP hook checks the result and either allows or denies the request
-
-**Thread Safety:** Uses `std::atomic<int>` with explicit memory ordering for the handoff between worker and event loop threads.
-
-**Fallback:** If async queueing fails, the module transparently falls back to synchronous processing.
-
----
+Config: `modsecAsync 1` -- offloads WAF rule evaluation to worker threads.
 
 ### 8. CPU Affinity Configuration
 
-Pin worker processes to specific CPU cores for better L1/L2 cache utilization and reduced context switching overhead.
+Config: `cpuAffinityMode 1` (auto) or `cpuAffinityMode 2` with `cpuAffinityList 0,2,4-7` (manual).
 
-**Configuration:**
-```
-cpuAffinityMode    2
-cpuAffinityList    0,2,4-7
-```
+### 9. VHost Bandwidth Throttling (NEW)
 
-| Parameter | Values | Description |
-|-----------|--------|-------------|
-| `cpuAffinityMode` | `0` | Disabled |
-| | `1` | Auto (assigns cores round-robin) |
-| | `2` | Manual (uses `cpuAffinityList`) |
-| `cpuAffinityList` | `"0,2,4-7"` | Comma-separated CPU IDs and ranges |
-
-**Backward Compatible:** When `cpuAffinityMode` is not set but `cpuAffinity` (legacy OLS option) is > 0, auto mode is used.
-
----
-
-## Building from Source
-
-### Prerequisites
-
-```bash
-# Ubuntu/Debian
-apt-get install build-essential cmake libssl-dev libpcre3-dev zlib1g-dev \
-    libxml2-dev libgeoip-dev libhiredis-dev libmodsecurity-dev
-
-# CentOS/RHEL
-yum install gcc gcc-c++ cmake openssl-devel pcre-devel zlib-devel \
-    libxml2-devel GeoIP-devel hiredis-devel libmodsecurity-devel
-```
-
-**Optional dependencies:**
-- `hiredis` - Required for Redis VHost module (skipped if not found)
-- `libmodsecurity` - Required for ModSecurity module
-- `brotli` - For Brotli compression support
-
-### Build
-
-```bash
-git clone https://github.com/kumaraguru1735/openlitespeed-enterprise.git
-cd openlitespeed-enterprise
-
-mkdir build && cd build
-cmake .. \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DMOD_SECURITY=ON \
-    -DCMAKE_INSTALL_PREFIX=/usr/local/lsws
-make -j$(nproc)
-sudo make install
-```
-
-### Build Options
-
-| CMake Option | Default | Description |
-|-------------|---------|-------------|
-| `MOD_SECURITY` | ON | Build ModSecurity module |
-| `MOD_PAGESPEED` | OFF | Build PageSpeed module (Linux x64 only) |
-| `MOD_LUA` | OFF | Build Lua module (Linux x64) |
-| `MOD_REDISVHOST` | AUTO | Build Redis VHost module (auto-detects hiredis) |
-
----
-
-## Quick Configuration Example
-
-A minimal config showcasing enterprise features:
+Prevents any single virtual host from monopolizing server bandwidth. Critical for shared hosting fairness.
 
 ```apacheconf
-# /usr/local/lsws/conf/httpd_config.conf
-
-serverName                LiteSpeed Enterprise
-sslAsyncHandshake         1
-cpuAffinityMode           1
-jitVHost                  1
-
-module mod_wpprotect {
-    wpProtect             1
-    wpProtectMaxRetry     5
-    wpProtectLockout      300
-    wpProtectAction       1
-    recaptchaSiteKey      6Le...YOUR_KEY
-    recaptchaSecretKey    6Le...YOUR_SECRET
-}
-
-module mod_security {
-    modsecurity           1
-    modsecurity_rules_file /etc/modsecurity/owasp-crs/main.conf
-    modsecAsync           1
-}
-
-module mod_redisvhost {
-    redisVHostEnable      1
-    redisVHostServer      127.0.0.1:6379
-    redisVHostTTL         300
-}
-
-listener Default {
-    address               *:443
-    secure                1
-    ...
+virtualhost example.com {
+    # Limit this vhost to 10 MB/s aggregate bandwidth
+    vhBandwidthLimit      10485760
 }
 ```
+
+### 10. Anti-DDoS reCAPTCHA Integration (NEW)
+
+When the server detects connection abuse, instead of immediately banning the client, it redirects to a reCAPTCHA challenge first. Only bans on failure.
+
+```apacheconf
+antiDdosCaptcha           1
+```
+
+**Escalation flow:** Normal -> Soft Limit -> reCAPTCHA Challenge -> Ban (if challenge fails)
+
+### 11. LSAPI Daemon/ProcessGroup Mode (NEW)
+
+Instead of spawning a new PHP process per request, maintains persistent parent LSPHP processes per user that fork children on demand. Dramatically improves PHP performance for shared hosting.
+
+```apacheconf
+extprocessor lsphp {
+    type                  lsapi
+    lsapiDaemonMode       1
+    lsapiMaxChildren      5
+    lsapiMaxIdleTime      300
+    lsapiMaxReqs          10000
+}
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `lsapiDaemonMode` | `0` | 0=off, 1=daemon mode |
+| `lsapiMaxChildren` | `5` | Max child processes per daemon |
+| `lsapiMaxIdleTime` | `300` | Idle timeout before recycling (seconds) |
+| `lsapiMaxReqs` | `10000` | Max requests before recycling child |
 
 ---
 
@@ -381,6 +453,9 @@ listener Default {
 | JIT VHost Loading | No | Yes | Yes |
 | Redis Dynamic VHost | No | Yes | Yes |
 | CPU Affinity Config | Basic | Yes | Yes |
+| VHost Bandwidth Throttle | No | Yes | Yes |
+| Anti-DDoS + reCAPTCHA | Separate | Integrated | Integrated |
+| LSAPI Daemon Mode | No | Yes | Yes |
 | Apache Config Import | No | Yes | No |
 | LiteMage (Magento) | No | Paid Add-on | Via ESI |
 | cPanel/WHM Integration | No | Yes | No |
@@ -394,29 +469,120 @@ listener Default {
 ```
 src/
 ├── http/
-│   ├── htaccessparser.cpp/h      # Full Apache .htaccess parser
+│   ├── htaccessparser.cpp/h      # Full Apache .htaccess parser (~2200 lines)
 │   ├── jitconfigloader.cpp/h     # Just-in-time VHost loading
-│   ├── vhostmap.cpp/h            # Modified for JIT integration
+│   ├── clientinfo.h/cpp          # Anti-DDoS with reCAPTCHA escalation
+│   ├── httpvhost.h/cpp           # VHost bandwidth throttling
+│   ├── vhostmap.cpp/h            # JIT integration
 │   └── ...
 ├── modules/
 │   ├── esi/                      # ESI module
-│   │   ├── mod_esi.cpp           # Main ESI module (970 lines)
+│   │   ├── mod_esi.cpp           # Main ESI module
 │   │   ├── esiparser.cpp/h       # Streaming ESI tag parser
 │   │   └── CMakeLists.txt
 │   ├── wpprotect/                # WordPress protection
-│   │   ├── mod_wpprotect.cpp     # WP brute force module (822 lines)
+│   │   ├── mod_wpprotect.cpp     # WP brute force module
 │   │   └── CMakeLists.txt
 │   ├── redisvhost/               # Redis VHost
-│   │   ├── mod_redisvhost.cpp    # Redis dynamic vhost module (935 lines)
+│   │   ├── mod_redisvhost.cpp    # Redis dynamic vhost module
 │   │   └── CMakeLists.txt
 │   └── modsecurity-ls/
-│       └── mod_security.cpp      # Enhanced with async WAF processing
+│       └── mod_security.cpp      # Async WAF processing
+├── extensions/
+│   └── lsapi/
+│       ├── lsapidaemon.cpp/h     # LSAPI Daemon/ProcessGroup mode
+│       └── ...
 ├── sslpp/
 │   ├── sslasynchandshake.cpp/h   # Async SSL handshake offloading
 │   └── ...
 └── main/
-    ├── httpserver.cpp             # JIT VHost & config integration
-    └── lshttpdmain.cpp           # SSL async init & CPU affinity
+    ├── httpserver.cpp             # JIT VHost, bandwidth throttle, config
+    └── lshttpdmain.cpp           # SSL async init, CPU affinity
+```
+
+---
+
+## Troubleshooting
+
+### Server won't start
+```bash
+# Check error log
+tail -50 /usr/local/lsws/logs/error.log
+
+# Test config
+/usr/local/lsws/bin/lswsctrl configtest
+
+# Check if port is in use
+sudo ss -tlnp | grep ':80\|:443'
+```
+
+### .htaccess not working
+```bash
+# Verify autoLoadHtaccess is enabled in vhost config
+grep -r "autoLoadHtaccess" /usr/local/lsws/conf/
+
+# Check error log for parse warnings
+grep "htaccess" /usr/local/lsws/logs/error.log
+```
+
+### Redis VHost not connecting
+```bash
+# Test Redis connectivity
+redis-cli -h 127.0.0.1 -p 6379 ping
+
+# Check for module errors
+grep "redisvhost" /usr/local/lsws/logs/error.log
+
+# Verify Redis has data
+redis-cli GET "vhost:yourdomain.com"
+```
+
+### ModSecurity async issues
+```bash
+# Check if async is active
+grep "modsecAsync" /usr/local/lsws/conf/httpd_config.conf
+
+# Monitor WAF decisions
+grep "mod_security" /usr/local/lsws/logs/error.log
+```
+
+### PHP performance issues
+```bash
+# Check LSAPI daemon processes
+ps aux | grep lsphp
+
+# Verify daemon mode is enabled
+grep "lsapiDaemonMode" /usr/local/lsws/conf/vhosts/*/vhconf.conf
+```
+
+---
+
+## systemd Service
+
+Create `/etc/systemd/system/lsws-enterprise.service`:
+
+```ini
+[Unit]
+Description=LiteSpeed Enterprise Web Server
+After=network.target
+
+[Service]
+Type=forking
+PIDFile=/var/run/lsws-enterprise.pid
+ExecStart=/usr/local/lsws/bin/lswsctrl start
+ExecStop=/usr/local/lsws/bin/lswsctrl stop
+ExecReload=/usr/local/lsws/bin/lswsctrl restart
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable lsws-enterprise
+sudo systemctl start lsws-enterprise
 ```
 
 ---

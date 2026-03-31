@@ -34,7 +34,7 @@
 
 WorkCrew       *SslAsyncHandshake::s_pWorkCrew = NULL;
 ls_lfqueue_t   *SslAsyncHandshake::s_pFinishedQueue = NULL;
-int             SslAsyncHandshake::s_iEnabled = 0;
+volatile int    SslAsyncHandshake::s_iEnabled = 0;
 
 
 /**

@@ -174,16 +174,8 @@ HttpVHost *JitVHostMap::loadVHost(const char *pDomain)
 
     if (pEntry->isLoading())
     {
-        // Another thread is loading this entry right now - wait
         pthread_mutex_unlock(&m_mutex);
-        // Spin briefly - this is a rare condition
-        for (int i = 0; i < 100; ++i)
-        {
-            if (pEntry->isLoaded())
-                return pEntry->getVHost();
-            usleep(10000); // 10ms
-        }
-        return pEntry->getVHost(); // Return whatever we have
+        return NULL;  // Another thread is loading, caller retries on next request
     }
 
     pEntry->setLoading(true);

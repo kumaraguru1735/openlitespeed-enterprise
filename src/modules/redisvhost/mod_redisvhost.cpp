@@ -182,7 +182,7 @@ static void cache_destroy()
 }
 
 
-static cached_vhost_t *cache_lookup(const char *hostname)
+static int cache_lookup(const char *hostname, cached_vhost_t *out)
 {
     unsigned int idx = djb2_hash(hostname) % CACHE_BUCKETS;
     time_t now = time(NULL);
@@ -196,8 +196,10 @@ static cached_vhost_t *cache_lookup(const char *hostname)
         {
             if (p->expire_time > now)
             {
+                memcpy(out, p, sizeof(cached_vhost_t));
+                out->next = NULL;
                 pthread_mutex_unlock(&s_cache.lock);
-                return p;
+                return 0;
             }
             // Expired - remove
             if (prev)
@@ -207,13 +209,13 @@ static cached_vhost_t *cache_lookup(const char *hostname)
             --s_cache.count;
             free(p);
             pthread_mutex_unlock(&s_cache.lock);
-            return NULL;
+            return -1;
         }
         prev = p;
         p = p->next;
     }
     pthread_mutex_unlock(&s_cache.lock);
-    return NULL;
+    return -1;
 }
 
 
@@ -397,7 +399,37 @@ static int json_get_string(const char *json, const char *key,
             len = out_len - 1;
         memcpy(out, pos, len);
         out[len] = '\0';
-        return len;
+
+        // Unescape JSON escape sequences in-place
+        char *rd = out, *wr = out;
+        while (*rd)
+        {
+            if (*rd == '\\' && *(rd + 1))
+            {
+                ++rd;
+                switch (*rd)
+                {
+                case '\\': *wr++ = '\\'; break;
+                case '"':  *wr++ = '"';  break;
+                case '/':  *wr++ = '/';  break;
+                case 'n':  *wr++ = '\n'; break;
+                case 't':  *wr++ = '\t'; break;
+                case 'r':  *wr++ = '\r'; break;
+                default:
+                    /* Unknown escape - preserve both characters */
+                    *wr++ = '\\';
+                    *wr++ = *rd;
+                    break;
+                }
+                ++rd;
+            }
+            else
+            {
+                *wr++ = *rd++;
+            }
+        }
+        *wr = '\0';
+        return (int)(wr - out);
     }
     return -1;
 }
@@ -572,21 +604,22 @@ static int on_rcvd_req_header(lsi_param_t *param)
         lookup_host = hostname + 4;
 
     // Check cache first
-    cached_vhost_t *cached = cache_lookup(lookup_host);
-    if (!cached && strncmp(hostname, "www.", 4) == 0)
-        cached = cache_lookup(hostname);
+    cached_vhost_t cached;
+    int cache_hit = cache_lookup(lookup_host, &cached);
+    if (cache_hit != 0 && strncmp(hostname, "www.", 4) == 0)
+        cache_hit = cache_lookup(hostname, &cached);
 
-    if (cached)
+    if (cache_hit == 0)
     {
         // Set document root from cache
-        if (cached->doc_root[0])
+        if (cached.doc_root[0])
         {
             g_api->set_req_env(param->session, "REDIS_VHOST_DOCROOT",
-                               19, cached->doc_root, strlen(cached->doc_root));
+                               19, cached.doc_root, strlen(cached.doc_root));
         }
         g_api->log(param->session, LSI_LOG_DEBUG,
                    "[mod_redisvhost] Cache hit for [%s] -> docRoot=%s\n",
-                   lookup_host, cached->doc_root);
+                   lookup_host, cached.doc_root);
         return LSI_OK;
     }
 
@@ -682,20 +715,22 @@ static int on_uri_map(lsi_param_t *param)
         return LSI_OK;
 
     // Check if we have a Redis vhost docroot set
-    int val_len = 0;
-    const char *docroot = g_api->get_req_env(param->session,
-                          "REDIS_VHOST_DOCROOT", 19, &val_len);
+    char docroot_buf[MAX_PATH_LEN_RV];
+    int val_len = g_api->get_req_env(param->session,
+                      "REDIS_VHOST_DOCROOT", 19,
+                      docroot_buf, sizeof(docroot_buf));
 
-    if (!docroot || val_len <= 0)
+    if (val_len <= 0)
         return LSI_OK;
+    docroot_buf[val_len] = '\0';
 
     // Verify the document root directory exists
     struct stat st;
-    if (stat(docroot, &st) == -1 || !S_ISDIR(st.st_mode))
+    if (stat(docroot_buf, &st) == -1 || !S_ISDIR(st.st_mode))
     {
         g_api->log(param->session, LSI_LOG_WARN,
-                   "[mod_redisvhost] docRoot [%.*s] does not exist or is "
-                   "not a directory\n", val_len, docroot);
+                   "[mod_redisvhost] docRoot [%s] does not exist or is "
+                   "not a directory\n", docroot_buf);
         return LSI_OK;
     }
 
@@ -708,8 +743,8 @@ static int on_uri_map(lsi_param_t *param)
     uri_buf[uri_len] = '\0';
 
     char full_path[MAX_PATH_LEN_RV * 2];
-    int flen = snprintf(full_path, sizeof(full_path), "%.*s%s",
-                        val_len, docroot, uri_buf);
+    int flen = snprintf(full_path, sizeof(full_path), "%s%s",
+                        docroot_buf, uri_buf);
     if (flen > 0 && flen < (int)sizeof(full_path))
     {
         // Set the mapped file path via environment; the actual rewrite
@@ -720,8 +755,8 @@ static int on_uri_map(lsi_param_t *param)
     }
 
     g_api->log(param->session, LSI_LOG_DEBUG,
-               "[mod_redisvhost] URI map: docRoot=%.*s, uri=%s\n",
-               val_len, docroot, uri_buf);
+               "[mod_redisvhost] URI map: docRoot=%s, uri=%s\n",
+               docroot_buf, uri_buf);
 
     return LSI_OK;
 }
@@ -768,6 +803,8 @@ static void parse_host_port(const char *val, int val_len,
     {
         *colon = '\0';
         *out_host = strdup(buf);
+        if (!*out_host)
+            *out_host = strdup(DEF_REDIS_HOST);
         *out_port = atoi(colon + 1);
         if (*out_port <= 0 || *out_port > 65535)
             *out_port = DEF_REDIS_PORT;
@@ -775,6 +812,8 @@ static void parse_host_port(const char *val, int val_len,
     else
     {
         *out_host = strdup(buf);
+        if (!*out_host)
+            *out_host = strdup(DEF_REDIS_HOST);
         *out_port = DEF_REDIS_PORT;
     }
 }
@@ -798,20 +837,42 @@ static void *redisvhost_parseConfig(module_param_info_t *param,
     {
         myConf->enabled = initConf->enabled;
         if (initConf->host)
+        {
             myConf->host = strdup(initConf->host);
+            if (!myConf->host)
+                myConf->host = strdup(DEF_REDIS_HOST);
+        }
         myConf->port = initConf->port;
         if (initConf->password)
+        {
             myConf->password = strdup(initConf->password);
+            /* password NULL is acceptable - means no auth */
+        }
         myConf->ttl = initConf->ttl;
         if (initConf->key_prefix)
+        {
             myConf->key_prefix = strdup(initConf->key_prefix);
+            if (!myConf->key_prefix)
+                myConf->key_prefix = strdup(DEF_REDIS_PREFIX);
+        }
     }
     else
     {
         myConf->host = strdup(DEF_REDIS_HOST);
+        if (!myConf->host)
+        {
+            free(myConf);
+            return NULL;
+        }
         myConf->port = DEF_REDIS_PORT;
         myConf->ttl = DEF_REDIS_TTL;
         myConf->key_prefix = strdup(DEF_REDIS_PREFIX);
+        if (!myConf->key_prefix)
+        {
+            free(myConf->host);
+            free(myConf);
+            return NULL;
+        }
     }
 
     if (!param || param_count <= 0)
@@ -837,18 +898,23 @@ static void *redisvhost_parseConfig(module_param_info_t *param,
             if (myConf->password)
                 free(myConf->password);
             myConf->password = strndup(param[i].val, param[i].val_len);
+            /* password NULL is acceptable - means no auth */
             break;
 
         case PARAM_TTL:
             myConf->ttl = atoi(param[i].val);
             if (myConf->ttl < 0)
                 myConf->ttl = DEF_REDIS_TTL;
+            if (myConf->ttl > 86400 * 30)
+                myConf->ttl = 86400 * 30;  /* Cap at 30 days */
             break;
 
         case PARAM_KEY_PREFIX:
             if (myConf->key_prefix)
                 free(myConf->key_prefix);
             myConf->key_prefix = strndup(param[i].val, param[i].val_len);
+            if (!myConf->key_prefix)
+                myConf->key_prefix = strdup(DEF_REDIS_PREFIX);
             break;
         }
     }

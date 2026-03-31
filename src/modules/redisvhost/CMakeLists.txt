@@ -25,5 +25,5 @@ add_library(mod_redisvhost SHARED
 )
 
 target_include_directories(mod_redisvhost PRIVATE ${HIREDIS_INCLUDE_DIR})
-target_link_libraries(mod_redisvhost ${HIREDIS_LIBRARY})
+target_link_libraries(mod_redisvhost ${HIREDIS_LIBRARY} pthread)
 set_target_properties(mod_redisvhost PROPERTIES PREFIX "")

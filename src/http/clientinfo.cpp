@@ -40,6 +40,7 @@ int ClientInfo::s_iHardLimitPC = 100;
 int ClientInfo::s_iOverLimitGracePeriod = 10;
 int ClientInfo::s_iBanPeriod = 60;
 uint16_t ClientInfo::s_iMaxAllowedBotHits = 3;
+int ClientInfo::s_iAntiDdosCaptcha = 0;
 
 #if 0
 TShmClientPool *ClientInfo::s_base = NULL;
@@ -216,11 +217,39 @@ int ClientInfo::checkAccess()
             if (DateTime::s_curTime - getOverLimitTime()
                 >= ClientInfo::getOverLimitGracePeriod())
             {
-                LS_NOTICE("[%s] reached per client soft connection limit: %d for %d seconds,"
-                          " close connection!", getAddrString(), iSoftLimit,
-                          (int)(DateTime::s_curTime - getOverLimitTime()));
-                markAsBot( "N/A", BOT_OVER_SOFT );
-                return 1;
+                if (s_iAntiDdosCaptcha && !isFlagSet(CIF_DDOS_CAPTCHA_REQ))
+                {
+                    LS_NOTICE("[%s] reached per client soft connection limit: %d for %d seconds,"
+                              " requiring captcha verification.",
+                              getAddrString(), iSoftLimit,
+                              (int)(DateTime::s_curTime - getOverLimitTime()));
+                    setFlag(CIF_DDOS_CAPTCHA_REQ);
+                    setOverLimitTime(DateTime::s_curTime);
+                    return 0;
+                }
+                else if (s_iAntiDdosCaptcha && isFlagSet(CIF_DDOS_CAPTCHA_REQ))
+                {
+                    if (DateTime::s_curTime - getOverLimitTime()
+                        >= ClientInfo::getBanPeriod())
+                    {
+                        LS_NOTICE("[%s] captcha grace period expired (%d seconds),"
+                                  " escalating to ban.",
+                                  getAddrString(),
+                                  (int)(DateTime::s_curTime - getOverLimitTime()));
+                        clearFlag(CIF_DDOS_CAPTCHA_REQ);
+                        markAsBot("N/A", BOT_OVER_SOFT);
+                        return 1;
+                    }
+                    return 0;
+                }
+                else
+                {
+                    LS_NOTICE("[%s] reached per client soft connection limit: %d for %d seconds,"
+                              " close connection!", getAddrString(), iSoftLimit,
+                              (int)(DateTime::s_curTime - getOverLimitTime()));
+                    markAsBot( "N/A", BOT_OVER_SOFT );
+                    return 1;
+                }
             }
             else
             {

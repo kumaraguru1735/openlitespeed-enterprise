@@ -462,11 +462,13 @@ static void freeAsyncJob(AsyncWafJob *pJob)
     if (!pJob)
         return;
     if (pJob->uri)
-        delete[] pJob->uri;
+        free(pJob->uri);
     for (int i = 0; i < pJob->hdrCount; ++i)
     {
-        delete[] pJob->headers[i].key;
-        delete[] pJob->headers[i].val;
+        if (pJob->headers[i].key)
+            free(pJob->headers[i].key);
+        if (pJob->headers[i].val)
+            free(pJob->headers[i].val);
     }
     delete pJob;
 }
@@ -612,7 +614,12 @@ static AsyncWafJob *buildAsyncJob(lsi_param_t *rec, ModData *myData,
     const char *qs = g_api->get_req_query_string(session, &qs_len);
     int uriLen = g_api->get_req_org_uri(session, NULL, 0);
     int uriMaxLen = uriLen + 1 + qs_len + 1;
-    pJob->uri = new char[uriMaxLen];
+    pJob->uri = (char *)malloc(uriMaxLen);
+    if (!pJob->uri)
+    {
+        freeAsyncJob(pJob);
+        return NULL;
+    }
     memset(pJob->uri, 0, uriMaxLen);
     g_api->get_req_org_uri(session, pJob->uri, uriLen + 1);
     if (qs_len > 0)
@@ -650,12 +657,24 @@ static AsyncWafJob *buildAsyncJob(lsi_param_t *rec, ModData *myData,
     for (int i = 0; i < count; ++i)
     {
         pJob->headers[i].keyLen = iov_key[i].iov_len;
-        pJob->headers[i].key = new char[iov_key[i].iov_len + 1];
+        pJob->headers[i].key = (char *)malloc(iov_key[i].iov_len + 1);
+        if (!pJob->headers[i].key)
+        {
+            pJob->hdrCount = i;
+            freeAsyncJob(pJob);
+            return NULL;
+        }
         memcpy(pJob->headers[i].key, iov_key[i].iov_base, iov_key[i].iov_len);
         pJob->headers[i].key[iov_key[i].iov_len] = '\0';
 
         pJob->headers[i].valLen = iov_val[i].iov_len;
-        pJob->headers[i].val = new char[iov_val[i].iov_len + 1];
+        pJob->headers[i].val = (char *)malloc(iov_val[i].iov_len + 1);
+        if (!pJob->headers[i].val)
+        {
+            pJob->hdrCount = i + 1;
+            freeAsyncJob(pJob);
+            return NULL;
+        }
         memcpy(pJob->headers[i].val, iov_val[i].iov_base, iov_val[i].iov_len);
         pJob->headers[i].val[iov_val[i].iov_len] = '\0';
     }

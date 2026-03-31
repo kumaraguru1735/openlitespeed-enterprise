@@ -81,8 +81,9 @@ private:
     AutoStr2    m_sDomain;
     AutoStr2    m_sAliases;
     HttpVHost  *m_pVHost;
-    bool        m_bLoaded;
-    bool        m_bLoading;
+    // volatile: read outside mutex in double-checked locking pattern
+    volatile bool   m_bLoaded;
+    volatile bool   m_bLoading;
     time_t      m_loadTime;
 
     LS_NO_COPY_ASSIGN(JitVHostEntry);

@@ -57,7 +57,7 @@ class VHostMap : private HashStringMap< HttpVHost * >, public RefCounter
     int removeWildMatch(const char *pName);
     HttpVHost *wildMatch(const char *pHost, const char *pEnd) const;
     void removeWildMatch(WildMatchList::iterator iter);
-    HttpVHost *jitLoadVHost(const char *pHost) const;
+    HttpVHost *jitLoadVHost(const char *pHost);
 
     void zconfAppendWildMatchList(GHash *pHash);
 public:
@@ -83,10 +83,12 @@ public:
         if (m_pWildMatches)
         {
             HttpVHost *pMatch = wildMatch(pHost, pHostEnd);
-            if (pMatch)
+            // wildMatch returns m_pCatchAll as fallback; only treat
+            // a non-catchall result as a definitive match.
+            if (pMatch && pMatch != m_pCatchAll)
                 return pMatch;
         }
-        // Try JIT loading if enabled and no match found
+        // Try JIT loading if enabled and no exact/wild match found
         if (m_pJitVHostMap)
         {
             HttpVHost *pJit = jitLoadVHost(pHost);

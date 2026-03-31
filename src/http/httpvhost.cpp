@@ -238,6 +238,8 @@ const char *HttpVHost::getAccessLogPath() const
 HttpVHost::HttpVHost(const char *pHostName)
     : m_pLogger(NULL)
     , m_pBytesLog(NULL)
+    , m_iVhBwLimit(0)
+    , m_iVhBwAvail(0)
     , m_iMaxKeepAliveRequests(100)
     , m_iRewriteLogLevel(0)
     , m_iGlobalMatchContext(1)
@@ -440,6 +442,7 @@ void HttpVHost::onTimer30Secs()
 
 void HttpVHost::onTimer()
 {
+    resetVhBwQuota();
     using namespace LOG4CXX_NS;
     ServerProcessConfig &procConfig = ServerProcessConfig::getInstance();
     if (HttpServerConfig::getInstance().getProcNo())
@@ -3678,6 +3681,12 @@ HttpVHost *HttpVHost::configVHost(const XmlNode *pNode, const char *pName,
 
         pVHnew->getThrottleLimits()->config(pNode,
                                             ThrottleControl::getDefault(), &currentCtx);
+
+        {
+            int vhBwLimit = ConfigCtx::getCurConfigCtx()->getLongValue(
+                                pNode, "vhBandwidthLimit", 0, INT_MAX, 0);
+            pVHnew->setVhBandwidthLimit(vhBwLimit);
+        }
 
         int is_uid_set = (pVHnew->configUserGroup(pNode) == LS_OK);
 

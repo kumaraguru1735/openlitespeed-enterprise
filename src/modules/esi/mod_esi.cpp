@@ -156,19 +156,23 @@ struct EsiModData
  */
 static int ensureBodyCap(EsiModData *pData, int needed)
 {
+    if (needed <= 0)
+        return 0;
+    if (needed > ESI_MAX_BODY_SIZE - pData->bodyLen)
+        return -1;
     int required = pData->bodyLen + needed;
     if (required <= pData->bodyCap)
         return 0;
 
-    int newCap = pData->bodyCap * 2;
+    int newCap = pData->bodyCap;
+    if (newCap <= 0)
+        newCap = 4096;
+    while (newCap < required && newCap <= ESI_MAX_BODY_SIZE / 2)
+        newCap *= 2;
     if (newCap < required)
         newCap = required;
     if (newCap > ESI_MAX_BODY_SIZE)
-    {
-        if (required > ESI_MAX_BODY_SIZE)
-            return -1;
         newCap = ESI_MAX_BODY_SIZE;
-    }
 
     char *newBuf = (char *)realloc(pData->bodyBuf, newCap);
     if (!newBuf)
@@ -184,11 +188,19 @@ static int ensureBodyCap(EsiModData *pData, int needed)
  */
 static int ensureOutputCap(EsiModData *pData, int needed)
 {
+    if (needed <= 0)
+        return 0;
+    if (needed > ESI_MAX_BODY_SIZE - pData->outputLen)
+        return -1;
     int required = pData->outputLen + needed;
     if (required <= pData->outputCap)
         return 0;
 
-    int newCap = pData->outputCap * 2;
+    int newCap = pData->outputCap;
+    if (newCap <= 0)
+        newCap = 4096;
+    while (newCap < required && newCap <= ESI_MAX_BODY_SIZE / 2)
+        newCap *= 2;
     if (newCap < required)
         newCap = required;
 
@@ -421,35 +433,52 @@ static int assembleOutput(const lsi_session_t *session, EsiModData *pData)
     if (count <= 0)
         return 0;
 
-    // Track try/attempt/except state.
-    // When processing nodes inside a TRY block:
-    //   - First process ATTEMPT children; if all includes succeed, skip EXCEPT.
-    //   - If any ATTEMPT include fails, use EXCEPT children instead.
-    int attemptFailed = 0;  // per-try state
+    // Enforce recursion depth to prevent infinite self-includes
+    if (pData->depth >= ESI_MAX_DEPTH)
+    {
+        g_api->log(session, LSI_LOG_WARN,
+                   "[%s] ESI max recursion depth (%d) exceeded, aborting.\n",
+                   MODULE_NAME_STR, ESI_MAX_DEPTH);
+        return -1;
+    }
+    pData->depth++;
+
+    // Stack-based try/attempt/except nesting support (max 8 levels deep)
+    #define ESI_TRY_STACK_MAX   8
+    struct TryState {
+        int attemptFailed;
+        int inAttempt;
+        int inExcept;
+        int skipAttempt;
+        int skipExcept;
+    };
+    TryState tryStack[ESI_TRY_STACK_MAX];
+    int tryDepth = 0;
+
+    // Current active state (top of stack or default)
+    int attemptFailed = 0;
     int inAttempt     = 0;
     int inExcept      = 0;
-    int skipAttempt   = 0;  // set after attempt fails to skip rest
-    int skipExcept    = 0;  // set if attempt succeeded
+    int skipAttempt   = 0;
+    int skipExcept    = 0;
 
     for (int i = 0; i < count; ++i)
     {
         const EsiNode *node = &nodes[i];
 
+        // Check if current node should be skipped
+        int skip = (inExcept && skipExcept) || (inAttempt && skipAttempt);
+
         switch (node->type)
         {
         case ESI_NODE_TEXT:
-            if (inExcept && skipExcept)
-                break;
-            if (inAttempt && skipAttempt)
-                break;
-            appendOutput(pData, node->data, node->dataLen);
+            if (!skip)
+                appendOutput(pData, node->data, node->dataLen);
             break;
 
         case ESI_NODE_INCLUDE:
         {
-            if (inExcept && skipExcept)
-                break;
-            if (inAttempt && skipAttempt)
+            if (skip)
                 break;
 
             char *fragBuf  = NULL;
@@ -494,24 +523,30 @@ static int assembleOutput(const lsi_session_t *session, EsiModData *pData)
                                MODULE_NAME_STR,
                                node->dataLen, node->data ? node->data : "");
                 }
-                // onerror="continue": silently skip
             }
             break;
         }
 
         case ESI_NODE_REMOVE:
-            // Content between remove tags is already suppressed by parser.
-            // The REMOVE node itself is a no-op.
-            break;
-
         case ESI_NODE_COMMENT:
-            // Comments are suppressed in output.
             break;
 
         case ESI_NODE_TRY:
+            // Push current state onto stack
+            if (tryDepth < ESI_TRY_STACK_MAX)
+            {
+                tryStack[tryDepth].attemptFailed = attemptFailed;
+                tryStack[tryDepth].inAttempt     = inAttempt;
+                tryStack[tryDepth].inExcept      = inExcept;
+                tryStack[tryDepth].skipAttempt   = skipAttempt;
+                tryStack[tryDepth].skipExcept    = skipExcept;
+                tryDepth++;
+            }
             attemptFailed = 0;
             skipAttempt   = 0;
             skipExcept    = 0;
+            inAttempt     = 0;
+            inExcept      = 0;
             break;
 
         case ESI_NODE_ATTEMPT:
@@ -523,12 +558,33 @@ static int assembleOutput(const lsi_session_t *session, EsiModData *pData)
         case ESI_NODE_EXCEPT:
             inAttempt = 0;
             inExcept  = 1;
-            // If attempt succeeded, skip except content
-            if (!attemptFailed)
-                skipExcept = 1;
-            else
-                skipExcept = 0;
+            skipExcept = !attemptFailed;
             break;
+        }
+
+        // Detect end of TRY block: if this is the last node of an EXCEPT
+        // and the next node is not ATTEMPT or EXCEPT at the same level,
+        // pop the try stack. We detect TRY end by checking if the next
+        // node is a new TRY or we leave the current try scope.
+        if (node->type == ESI_NODE_EXCEPT && i + 1 < count)
+        {
+            const EsiNode *next = &nodes[i + 1];
+            if (next->type != ESI_NODE_TEXT
+                || (next->type == ESI_NODE_TRY
+                    || next->type == ESI_NODE_INCLUDE
+                    || next->type == ESI_NODE_REMOVE))
+            {
+                // Check if next node's parent differs (end of TRY scope)
+                if (next->parentIndex != node->parentIndex && tryDepth > 0)
+                {
+                    tryDepth--;
+                    attemptFailed = tryStack[tryDepth].attemptFailed;
+                    inAttempt     = tryStack[tryDepth].inAttempt;
+                    inExcept      = tryStack[tryDepth].inExcept;
+                    skipAttempt   = tryStack[tryDepth].skipAttempt;
+                    skipExcept    = tryStack[tryDepth].skipExcept;
+                }
+            }
         }
     }
 

@@ -1599,6 +1599,38 @@ int HttpSession::processNewReqInit()
                 return ret;
             }
         }
+
+        if (ClientInfo::getAntiDdosCaptcha()
+            && getClientInfo()->isDdosCaptchaRequired())
+        {
+            const char *ddos_reason = "AntiDDosCaptcha";
+            LS_DBG_M(getLogSession(),
+                     "[RECAPTCHA] Anti-DDoS captcha required for %s,"
+                     " redirecting to challenge.",
+                     getClientInfo()->getAddrString());
+            ret = rewriteToRecaptcha(2, HSPS_HKPT_HTTP_BEGIN, ddos_reason);
+            if (ret != 0)
+            {
+                if (ret == 1)
+                {
+                    if (m_request.getMethod() == HttpMethod::HTTP_POST)
+                    {
+                        setProcessState(HSPS_PROCESS_NEW_REQ_BODY);
+                        ret = processNewReqBody();
+                        if (ret)
+                            return ret;
+                    }
+                    setProcessState(HSPS_BEGIN_HANDLER_PROCESS);
+                    return 0;
+                }
+                else if (ret == LSI_SUSPEND)
+                {
+                    setFlag(HSF_HOOK_SESSION_STARTED);
+                    m_nextProcessState = HSPS_HKPT_HTTP_BEGIN;
+                }
+                return ret;
+            }
+        }
     }
 
     if (m_request.isKeepAlive())
@@ -2201,6 +2233,15 @@ void HttpSession::checkSuccessfulRecaptcha()
     pClientInfo->setAccess(AC_CAPTCHA);
     pClientInfo->resetCaptchaTries();
     pClientInfo->clearFlag(CIF_CAPTCHA_PENDING);
+
+    if (pClientInfo->isDdosCaptchaRequired())
+    {
+        LS_NOTICE("[RECAPTCHA] Anti-DDoS captcha verified for %.*s,"
+                  " clearing throttle state.",
+                  pClientInfo->getAddrStrLen(), pClientInfo->getAddrString());
+        pClientInfo->clearDdosCaptchaRequired();
+        pClientInfo->setOverLimitTime(0);
+    }
 }
 
 
@@ -3778,6 +3819,20 @@ int HttpSession::chunkSendfile(int fdSrc, off_t off, size_t size)
 off_t HttpSession::writeRespBodySendFile(int fdFile, off_t offset,
         size_t size, int flag)
 {
+    HttpVHost *pVHost = (HttpVHost *)m_request.getVHost();
+    if (pVHost && !pVHost->isVhBwUnlimited())
+    {
+        int vhQuota = pVHost->getVhBwAvail();
+        if (vhQuota <= 0)
+        {
+            LS_DBG_M(getLogSession(),
+                     "writeRespBodySendFile(): vhost bandwidth exhausted, suspending.\n");
+            getStream()->wantWrite(1);
+            return 0;
+        }
+        if ((off_t)size > vhQuota)
+            size = vhQuota;
+    }
     off_t written;
     if (m_pChunkOS)
         written = chunkSendfile(fdFile, offset, size);
@@ -3808,11 +3863,9 @@ off_t HttpSession::writeRespBodySendFile(int fdFile, off_t offset,
 inline void HttpSession::bytesSent(int bytes)
 {
     m_response.written(bytes);
-    /*
-     * lslbd has the below code
-    if (m_request.getVHost())
-        ((HttpVHost *)m_request.getVHost())->bytesSent(bytes, m_request.isHttps());
-    */
+    HttpVHost *pVHost = (HttpVHost *)m_request.getVHost();
+    if (pVHost && !pVHost->isVhBwUnlimited())
+        pVHost->useVhBwQuota(bytes);
 }
 
 
@@ -3828,6 +3881,20 @@ inline void HttpSession::bytesSent(int bytes)
 
 int HttpSession::writeRespBodyDirect(const char *pBuf, int size)
 {
+    HttpVHost *pVHost = (HttpVHost *)m_request.getVHost();
+    if (pVHost && !pVHost->isVhBwUnlimited())
+    {
+        int vhQuota = pVHost->getVhBwAvail();
+        if (vhQuota <= 0)
+        {
+            LS_DBG_M(getLogSession(),
+                     "writeRespBodyDirect(): vhost bandwidth exhausted, suspending.\n");
+            getStream()->wantWrite(1);
+            return 0;
+        }
+        if (size > vhQuota)
+            size = vhQuota;
+    }
     int written;
     if (m_pChunkOS)
         written = m_pChunkOS->write(pBuf, size);

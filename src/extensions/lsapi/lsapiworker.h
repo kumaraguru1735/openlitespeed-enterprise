@@ -21,9 +21,12 @@
 #include <lsdef.h>
 #include <extensions/localworker.h>
 class LsapiConfig;
+class LsapiDaemon;
 
 class LsapiWorker : public LocalWorker
 {
+    LsapiDaemon    *m_pDaemon;
+
 protected:
 
     virtual ExtConn *newConn();
@@ -37,6 +40,19 @@ public:
     {   return *((LsapiConfig *)getConfigPointer());  }
 
     int startEx();
+    int stop();
+
+    /**
+     * Start the worker via daemon mode if enabled,
+     * otherwise fall back to normal LocalWorker::startWorker().
+     */
+    int startDaemonWorker();
+
+    /**
+     * Called periodically; delegates to daemon's onTimer if active.
+     */
+    virtual void onTimer();
+
     LS_NO_COPY_ASSIGN(LsapiWorker);
 };
 

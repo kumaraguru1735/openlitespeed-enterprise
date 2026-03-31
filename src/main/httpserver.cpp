@@ -3262,6 +3262,8 @@ int HttpServerImpl::configSecurity(const XmlNode *pRoot)
                                                 10));
             ClientInfo::setBanPeriod(currentCtx.getLongValue(pNode1,
                                      "banPeriod", 1, INT_MAX, 60));
+            ClientInfo::setAntiDdosCaptcha(currentCtx.getLongValue(pNode1,
+                                     "antiDdosCaptcha", 0, 1, 0));
         }
 
         const int iAllowExtAppSetuid = currentCtx.getLongValue(pNode,
