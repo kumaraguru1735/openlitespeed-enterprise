@@ -20,14 +20,19 @@
 
 #include <ls.h>
 #include <lsr/ls_confparser.h>
+#include <lsr/ls_lfqueue.h>
+#include <lsr/ls_node.h>
+#include <lsr/ls_lock.h>
+#include <thread/workcrew.h>
 #include <modsecurity/modsecurity.h>
 #include <modsecurity/transaction.h>
 #include <modsecurity/rules_set.h>
+#include <atomic>
 class session;
 
 #define MNAME                       mod_security
 #define ModuleNameStr               "mod_security"
-#define VERSIONNUMBER               "1.4"
+#define VERSIONNUMBER               "1.5"
 
 #define MODULE_VERSION_INFO         ModuleNameStr " " VERSIONNUMBER
 
@@ -45,8 +50,17 @@ typedef struct msc_conf_t_{
     RulesSet               *rules_set;
     int                     enable;
     int                     level;
+    int                     async_enabled;
 } msc_conf_t;
 
+
+enum AsyncState
+{
+    ASYNC_NONE = 0,
+    ASYNC_QUEUED,
+    ASYNC_DONE_ALLOW,
+    ASYNC_DONE_DENY
+};
 
 typedef struct ModData_t
 {
@@ -54,7 +68,44 @@ typedef struct ModData_t
     RulesSet               *rules_set;
     int8_t                  chkReqBody;
     int8_t                  chkRespBody;
+    std::atomic<int>        asyncState;
+    int                     asyncDenyCode;
+    char                   *asyncRedirectUrl;
 } ModData;
+
+/**
+ * AsyncWafJob: queued to WorkCrew for offloaded ModSecurity evaluation.
+ * Embeds ls_lfnodei_t at the start so it can be cast to/from a queue node.
+ */
+struct AsyncWafJob
+{
+    ls_lfnodei_t            node;           // must be first member
+    lsi_session_t          *session;
+    ModData                *modData;
+    msc_conf_t             *conf;
+    // Copies of request metadata needed by the worker thread
+    char                    clientIp[128];
+    int                     clientPort;
+    char                    serverHost[512];
+    int                     serverPort;
+    char                   *uri;            // heap-allocated, worker frees
+    char                    httpMethod[16];
+    char                    httpVersion[8];
+    // Request headers snapshot
+    int                     hdrCount;
+    struct {
+        char               *key;
+        int                 keyLen;
+        char               *val;
+        int                 valLen;
+    }                       headers[MAX_REQ_HEADERS_NUMBER];
+};
+
+/////////////////////////////////////////////////////////////////////////////
+// Async WAF globals
+static WorkCrew            *s_pWafCrew      = NULL;
+static ls_lfqueue_t        *s_pFinishedQueue = NULL;
+static const int            WAF_CREW_WORKERS = 4;
 
 
 lsi_config_key_t paramArray[] =
@@ -63,6 +114,7 @@ lsi_config_key_t paramArray[] =
     {"modsecurity_rules",           1, 0},
     {"modsecurity_rules_file",      2, 0},
     {"modsecurity_rules_remote",    3, 0},
+    {"modsecAsync",                 4, 0},
     {NULL, 0, 0} //Must have NULL in the last item
 };
 
@@ -86,6 +138,11 @@ static int releaseMData(void *data)
         if (myData->modsec_transaction)
             msc_transaction_cleanup(myData->modsec_transaction);
         myData->modsec_transaction = NULL;
+        if (myData->asyncRedirectUrl)
+        {
+            free(myData->asyncRedirectUrl);
+            myData->asyncRedirectUrl = NULL;
+        }
         delete myData;
     }
     return 0;
@@ -164,6 +221,7 @@ static void *ParseConfig(module_param_info_t *param, int param_count,
      * Set default enable value to 0.
      */
     pConfig->enable = (pInitConfig ? pInitConfig->enable : 0);
+    pConfig->async_enabled = (pInitConfig ? pInitConfig->async_enabled : 0);
 
     if (!param || param_count == 0)
     {
@@ -235,6 +293,13 @@ static void *ParseConfig(module_param_info_t *param, int param_count,
                                pConfig->enable);
                 }
             }
+        }
+        else if (param[i].key_index == 4) // modsecAsync
+        {
+            pConfig->async_enabled = atoi(param[i].val);
+            g_api->log(NULL, LSI_LOG_INFO,
+                       "[Module:%s] Async WAF mode %s\n", ModuleNameStr,
+                       pConfig->async_enabled ? "enabled" : "disabled");
         }
         else
         {
@@ -364,9 +429,13 @@ static int createModData(lsi_param_t *rec, msc_conf_t *conf)
             return LSI_ERROR;
         }
 
-        memset(myData, 0, sizeof(ModData));
         myData->modsec_transaction = trans;
         myData->rules_set = conf->rules_set;
+        myData->chkReqBody = 0;
+        myData->chkRespBody = 0;
+        myData->asyncState.store(ASYNC_NONE, std::memory_order_relaxed);
+        myData->asyncDenyCode = 0;
+        myData->asyncRedirectUrl = NULL;
     }
 
     g_api->set_module_data(rec->session, &MNAME, LSI_DATA_HTTP,
@@ -384,6 +453,216 @@ static int isBypassCheck(lsi_session_t *session)
     else
         return 0;
 }
+
+/**
+ * freeAsyncJob - release heap memory held by an AsyncWafJob.
+ */
+static void freeAsyncJob(AsyncWafJob *pJob)
+{
+    if (!pJob)
+        return;
+    if (pJob->uri)
+        delete[] pJob->uri;
+    for (int i = 0; i < pJob->hdrCount; ++i)
+    {
+        delete[] pJob->headers[i].key;
+        delete[] pJob->headers[i].val;
+    }
+    delete pJob;
+}
+
+
+/**
+ * asyncWafProcessFn - WorkCrew processing callback.
+ * Runs on a worker thread.  Performs the ModSecurity connection, URI,
+ * request-header, and request-body phases, then signals the event loop
+ * to resume the suspended session.
+ */
+static void *asyncWafProcessFn(ls_lfnodei_t *item)
+{
+    AsyncWafJob *pJob = (AsyncWafJob *)item;
+    ModData *myData = pJob->modData;
+    Transaction *trans = myData->modsec_transaction;
+
+    // Phase 1: connection
+    msc_process_connection(trans, pJob->clientIp, pJob->clientPort,
+                           pJob->serverHost, pJob->serverPort);
+
+    ModSecurityIntervention intervention;
+    intervention.status = STATUS_OK;
+    intervention.url = NULL;
+    intervention.log = NULL;
+    intervention.disruptive = 0;
+    if (msc_intervention(trans, &intervention) && intervention.status != STATUS_OK)
+    {
+        myData->asyncDenyCode = intervention.status;
+        if (intervention.url)
+        {
+            myData->asyncRedirectUrl = intervention.url; // transfer ownership
+            intervention.url = NULL;
+        }
+        if (intervention.log)
+            free(intervention.log);
+        myData->asyncState.store(ASYNC_DONE_DENY, std::memory_order_release);
+        g_api->create_session_resume_event(pJob->session, &MNAME);
+        freeAsyncJob(pJob);
+        return NULL;
+    }
+    if (intervention.url)   free(intervention.url);
+    if (intervention.log)   free(intervention.log);
+
+    // Phase 2: URI
+    msc_process_uri(trans, pJob->uri, pJob->httpMethod, pJob->httpVersion);
+
+    intervention.status = STATUS_OK;
+    intervention.url = NULL;
+    intervention.log = NULL;
+    intervention.disruptive = 0;
+    if (msc_intervention(trans, &intervention) && intervention.status != STATUS_OK)
+    {
+        myData->asyncDenyCode = intervention.status;
+        if (intervention.url)
+        {
+            myData->asyncRedirectUrl = intervention.url;
+            intervention.url = NULL;
+        }
+        if (intervention.log)
+            free(intervention.log);
+        myData->asyncState.store(ASYNC_DONE_DENY, std::memory_order_release);
+        g_api->create_session_resume_event(pJob->session, &MNAME);
+        freeAsyncJob(pJob);
+        return NULL;
+    }
+    if (intervention.url)   free(intervention.url);
+    if (intervention.log)   free(intervention.log);
+
+    // Phase 3: request headers
+    for (int i = 0; i < pJob->hdrCount; ++i)
+    {
+        msc_add_n_request_header(trans,
+                                  (const unsigned char *)pJob->headers[i].key,
+                                  pJob->headers[i].keyLen,
+                                  (const unsigned char *)pJob->headers[i].val,
+                                  pJob->headers[i].valLen);
+    }
+    msc_process_request_headers(trans);
+
+    intervention.status = STATUS_OK;
+    intervention.url = NULL;
+    intervention.log = NULL;
+    intervention.disruptive = 0;
+    if (msc_intervention(trans, &intervention) && intervention.status != STATUS_OK)
+    {
+        myData->asyncDenyCode = intervention.status;
+        if (intervention.url)
+        {
+            myData->asyncRedirectUrl = intervention.url;
+            intervention.url = NULL;
+        }
+        if (intervention.log)
+            free(intervention.log);
+        myData->asyncState.store(ASYNC_DONE_DENY, std::memory_order_release);
+        g_api->create_session_resume_event(pJob->session, &MNAME);
+        freeAsyncJob(pJob);
+        return NULL;
+    }
+    if (intervention.url)   free(intervention.url);
+    if (intervention.log)   free(intervention.log);
+
+    // All phases passed - allow
+    myData->asyncState.store(ASYNC_DONE_ALLOW, std::memory_order_release);
+    g_api->create_session_resume_event(pJob->session, &MNAME);
+    freeAsyncJob(pJob);
+    return NULL;
+}
+
+
+/**
+ * buildAsyncJob - snapshot request metadata into an AsyncWafJob so the
+ *                 worker thread can evaluate ModSecurity rules without
+ *                 touching the session.
+ */
+static AsyncWafJob *buildAsyncJob(lsi_param_t *rec, ModData *myData,
+                                   msc_conf_t *conf)
+{
+    lsi_session_t *session = (lsi_session_t *)rec->session;
+    AsyncWafJob *pJob = new (std::nothrow) AsyncWafJob;
+    if (!pJob)
+        return NULL;
+    memset(pJob, 0, sizeof(AsyncWafJob));
+
+    pJob->session = session;
+    pJob->modData = myData;
+    pJob->conf    = conf;
+
+    // Client / server info
+    g_api->get_req_var_by_id(session, LSI_VAR_REMOTE_ADDR, pJob->clientIp, 128);
+    char cport[12] = {0};
+    g_api->get_req_var_by_id(session, LSI_VAR_REMOTE_PORT, cport, 12);
+    pJob->clientPort = atoi(cport);
+
+    g_api->get_req_var_by_id(session, LSI_VAR_SERVER_NAME,
+                              pJob->serverHost, 512);
+    char sport[12] = {0};
+    g_api->get_req_var_by_id(session, LSI_VAR_SERVER_PORT, sport, 12);
+    pJob->serverPort = atoi(sport);
+
+    // URI + query string
+    int qs_len;
+    const char *qs = g_api->get_req_query_string(session, &qs_len);
+    int uriLen = g_api->get_req_org_uri(session, NULL, 0);
+    int uriMaxLen = uriLen + 1 + qs_len + 1;
+    pJob->uri = new char[uriMaxLen];
+    memset(pJob->uri, 0, uriMaxLen);
+    g_api->get_req_org_uri(session, pJob->uri, uriLen + 1);
+    if (qs_len > 0)
+    {
+        *(pJob->uri + uriLen) = '?';
+        lstrncpy(pJob->uri + uriLen + 1, qs, qs_len + 1);
+    }
+
+    // Method + version
+    g_api->get_req_var_by_id(session, LSI_VAR_REQ_METHOD,
+                              pJob->httpMethod, 16);
+    char val[12] = {0};
+    int n = g_api->get_req_var_by_id(session, LSI_VAR_SERVER_PROTO, val, 12);
+    if (n >= 8)
+    {
+        char *ver = strchr(val, '/');
+        if (ver)
+            lstrncpy(pJob->httpVersion, ver + 1, 8);
+        else
+            lstrncpy(pJob->httpVersion, "1.1", 4);
+    }
+    else
+        lstrncpy(pJob->httpVersion, "1.1", 4);
+
+    // Snapshot request headers
+    int count = g_api->get_req_headers_count(session);
+    if (count > MAX_REQ_HEADERS_NUMBER)
+        count = MAX_REQ_HEADERS_NUMBER;
+
+    struct iovec iov_key[MAX_REQ_HEADERS_NUMBER];
+    struct iovec iov_val[MAX_REQ_HEADERS_NUMBER];
+    count = g_api->get_req_headers(session, iov_key, iov_val, count);
+    pJob->hdrCount = count;
+
+    for (int i = 0; i < count; ++i)
+    {
+        pJob->headers[i].keyLen = iov_key[i].iov_len;
+        pJob->headers[i].key = new char[iov_key[i].iov_len + 1];
+        memcpy(pJob->headers[i].key, iov_key[i].iov_base, iov_key[i].iov_len);
+        pJob->headers[i].key[iov_key[i].iov_len] = '\0';
+
+        pJob->headers[i].valLen = iov_val[i].iov_len;
+        pJob->headers[i].val = new char[iov_val[i].iov_len + 1];
+        memcpy(pJob->headers[i].val, iov_val[i].iov_base, iov_val[i].iov_len);
+        pJob->headers[i].val[iov_val[i].iov_len] = '\0';
+    }
+
+    return pJob;
+}
+
 
 static int UriMapHook(lsi_param_t *rec)
 {
@@ -430,6 +709,86 @@ static int UriMapHook(lsi_param_t *rec)
         }
     }
 
+    // ---- Async resume path: re-entered after worker thread completed ----
+    int curAsyncState = myData->asyncState.load(std::memory_order_acquire);
+    if (curAsyncState == ASYNC_DONE_DENY)
+    {
+        g_api->log(session, LSI_LOG_INFO,
+                   "[Module:%s] Async WAF denied request, status %d.\n",
+                   ModuleNameStr, myData->asyncDenyCode);
+
+        if (myData->asyncRedirectUrl)
+        {
+            int code = myData->asyncDenyCode;
+            if (code == 301 || code == 302 || code == 303 || code == 307)
+            {
+                g_api->set_resp_header(session,
+                                       LSI_RSPHDR_LOCATION, NULL, 0,
+                                       myData->asyncRedirectUrl,
+                                       strlen(myData->asyncRedirectUrl), 0);
+            }
+            free(myData->asyncRedirectUrl);
+            myData->asyncRedirectUrl = NULL;
+        }
+        g_api->set_status_code(session, myData->asyncDenyCode);
+        return LSI_ERROR;
+    }
+    else if (curAsyncState == ASYNC_DONE_ALLOW)
+    {
+        g_api->log(session, LSI_LOG_DEBUG,
+                   "[Module:%s] Async WAF allowed request, enabling hooks.\n",
+                   ModuleNameStr);
+
+        RulesSet *rules = myData->rules_set;
+        myData->chkReqBody = rules->m_secRequestBodyAccess == CHECKBODYTRUE;
+        myData->chkRespBody = rules->m_secResponseBodyAccess == CHECKBODYTRUE;
+
+        if (myData->chkReqBody && rules->m_requestBodyLimit.m_value > 3000)
+        {
+            long reqbodySize = g_api->get_req_content_length(session);
+            if (reqbodySize > rules->m_requestBodyLimit.m_value)
+                myData->chkReqBody = false;
+        }
+
+        int aEnableHkpt[4] = {LSI_HKPT_RCVD_RESP_HEADER,
+                              LSI_HKPT_HANDLER_RESTART,
+                              LSI_HKPT_RCVD_REQ_BODY,
+                              LSI_HKPT_RCVD_RESP_BODY};
+        if (myData->chkReqBody)
+            g_api->set_req_wait_full_body(session);
+        g_api->enable_hook(session, &MNAME, 1, aEnableHkpt, 4);
+        return LSI_OK;
+    }
+
+    // ---- Async path: offload rule evaluation to worker thread ----
+    if (conf->async_enabled && s_pWafCrew)
+    {
+        AsyncWafJob *pJob = buildAsyncJob(rec, myData, conf);
+        if (pJob)
+        {
+            myData->asyncState.store(ASYNC_QUEUED, std::memory_order_release);
+            g_api->log(session, LSI_LOG_DEBUG,
+                       "[Module:%s] Async WAF: queuing job for session %p.\n",
+                       ModuleNameStr, session);
+            if (s_pWafCrew->addJob((ls_lfnodei_t *)pJob) == 0)
+                return LSI_SUSPEND;
+
+            // addJob failed, fall through to synchronous processing
+            g_api->log(session, LSI_LOG_WARN,
+                       "[Module:%s] Async WAF: addJob failed, falling back "
+                       "to sync.\n", ModuleNameStr);
+            myData->asyncState.store(ASYNC_NONE, std::memory_order_relaxed);
+            freeAsyncJob(pJob);
+        }
+        else
+        {
+            g_api->log(session, LSI_LOG_WARN,
+                       "[Module:%s] Async WAF: buildAsyncJob failed, falling "
+                       "back to sync.\n", ModuleNameStr);
+        }
+    }
+
+    // ---- Synchronous path (original code) ----
     char host[512] = {0};
     g_api->get_req_var_by_id(session, LSI_VAR_SERVER_NAME, host, 512);
 
@@ -773,6 +1132,40 @@ static lsi_serverhook_t serverHooks[] =
 static int init(lsi_module_t *pModule)
 {
     g_api->init_module_data(pModule, releaseMData, LSI_DATA_HTTP);
+
+    // Initialize the async WAF worker pool.
+    // The pool is created unconditionally but only used when modsecAsync=1.
+    if (!s_pWafCrew)
+    {
+        s_pFinishedQueue = ls_lfqueue_new();
+        if (s_pFinishedQueue)
+        {
+            s_pWafCrew = new WorkCrew(WAF_CREW_WORKERS,
+                                       asyncWafProcessFn,
+                                       s_pFinishedQueue, NULL);
+            if (s_pWafCrew)
+            {
+                s_pWafCrew->startProcessing();
+                g_api->log(NULL, LSI_LOG_INFO,
+                           "[Module:%s] Async WAF WorkCrew started with %d "
+                           "workers.\n", ModuleNameStr, WAF_CREW_WORKERS);
+            }
+            else
+            {
+                ls_lfqueue_delete(s_pFinishedQueue);
+                s_pFinishedQueue = NULL;
+                g_api->log(NULL, LSI_LOG_ERROR,
+                           "[Module:%s] Failed to create async WAF WorkCrew.\n",
+                           ModuleNameStr);
+            }
+        }
+        else
+        {
+            g_api->log(NULL, LSI_LOG_ERROR,
+                       "[Module:%s] Failed to create finished queue for async "
+                       "WAF.\n", ModuleNameStr);
+        }
+    }
     return 0;
 }
 

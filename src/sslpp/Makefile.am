@@ -8,14 +8,15 @@ libsslpp_a_METASOURCES = AUTO
 libsslpp_a_SOURCES = sslengine.cpp sslcert.cpp sslerror.cpp sslconnection.cpp \
 sslcontext.cpp sslocspstapling.cpp sslsesscache.cpp \
 sslticket.cpp sslutil.cpp sslcontextconfig.cpp ocsp/ocsp.c ls_fdbuf_bio.c \
-sslasyncpk.cpp sslcertcomp.cpp
+sslasyncpk.cpp sslcertcomp.cpp sslasynchandshake.cpp
 
 
 EXTRA_DIST = sslcontext.cpp sslcontext.h sslconnection.cpp sslconnection.h \
 sslerror.cpp sslerror.h sslcert.cpp sslcert.h sslengine.cpp sslengine.h \
 sslutil.cpp sslutil.h sslcontextconfig.cpp \
 sslcontextconfig.h ls_fdbuf_bio.h ls_fdbuf_bio.c \
-sslasyncpk.h sslasyncpk.cpp sslcertcomp.cpp sslcertcomp.h
+sslasyncpk.h sslasyncpk.cpp sslcertcomp.cpp sslcertcomp.h \
+sslasynchandshake.h sslasynchandshake.cpp
 
 
 ####### kdevelop will overwrite this part!!! (end)############

@@ -21,6 +21,8 @@
 #include <http/httpdefs.h>
 #include <http/httplog.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 
 
@@ -59,6 +61,9 @@ HttpServerConfig::HttpServerConfig()
     , m_iDirForbiddenBits(000)   //S_IWOTH | S_IWGRP )
     , m_iRestartTimeout(300)
     , m_nCpuAffinity(0)
+    , m_iCpuAffinityMode(0)
+    , m_pCpuAffinityList(NULL)
+    , m_iSslAsyncHandshake(0)
     , m_iDnsLookup(1)
     , m_iUseProxyHeader(0)
     , m_iEnableH2c(0)
@@ -82,6 +87,16 @@ HttpServerConfig::~HttpServerConfig()
     delete m_pDeniedDir;
     if (m_pBwrapCmdLine)
         free(m_pBwrapCmdLine);
+    if (m_pCpuAffinityList)
+        free(m_pCpuAffinityList);
+}
+
+
+void HttpServerConfig::setCpuAffinityList(const char *pList)
+{
+    if (m_pCpuAffinityList)
+        free(m_pCpuAffinityList);
+    m_pCpuAffinityList = pList ? strdup(pList) : NULL;
 }
 
 

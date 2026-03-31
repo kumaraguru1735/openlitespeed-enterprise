@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.0)
 
 add_subdirectory(modgzip)
 add_subdirectory(cache)
+add_subdirectory(esi)
 
 if (MOD_REQPARSER)
     message("Make mod_reqparser")
@@ -36,5 +37,10 @@ endif()
 if (MOD_SECURITY)
     message("Make mod_security")
     add_subdirectory(modsecurity-ls)
+endif()
+
+if (MOD_REDISVHOST)
+    message("Make mod_redisvhost")
+    add_subdirectory(redisvhost)
 endif()
 

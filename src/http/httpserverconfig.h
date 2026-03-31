@@ -90,6 +90,9 @@ private:
     int32_t         m_iDirForbiddenBits;
     int32_t         m_iRestartTimeout;
     int32_t         m_nCpuAffinity;
+    int32_t         m_iCpuAffinityMode;     // 0=disabled, 1=auto, 2=manual
+    char           *m_pCpuAffinityList;     // comma-separated CPU list for mode 2
+    int32_t         m_iSslAsyncHandshake;
 
     int             m_iDnsLookup;
     int             m_iUseProxyHeader;
@@ -246,6 +249,14 @@ public:
 
     int getCpuAffinity() const              {   return m_nCpuAffinity;      }
     void setCpuAffinity( int count)         {   m_nCpuAffinity = count;     }
+
+    int getCpuAffinityMode() const          {   return m_iCpuAffinityMode;        }
+    void setCpuAffinityMode(int mode)       {   m_iCpuAffinityMode = mode;        }
+    const char *getCpuAffinityList() const  {   return m_pCpuAffinityList;        }
+    void setCpuAffinityList(const char *pList);
+
+    int getSslAsyncHandshake() const        {   return m_iSslAsyncHandshake;      }
+    void setSslAsyncHandshake(int v)        {   m_iSslAsyncHandshake = v;         }
 
     void setEnableMultiCerts(int v)  { m_iEnableMultiCerts = v; }
     int  getEnableMultiCerts() const { return m_iEnableMultiCerts; }

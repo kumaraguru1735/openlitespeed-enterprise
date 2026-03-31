@@ -54,6 +54,7 @@ public:
         F_ASYNC_PK          = 8,
         F_ASYNC_CERT_FAIL   = 16,
         F_HANDSHAKE_DONE    = 32,
+        F_ASYNC_HANDSHAKE   = 64,
     };
 
     char wantRead() const   {   return m_iWant & WANT_READ;     }
@@ -67,6 +68,10 @@ public:
     int  getFlag(int v) const   {   return m_flag & v;     }
     void setFlag(int f, int v)  {   m_flag = (m_flag & ~f) | (v ? f : 0);  }
     bool isWaitAsync() const    {   return m_flag & (F_ASYNC_CERT | F_ASYNC_PK);   }
+    bool isAsyncHandshake() const
+    {   return m_flag & F_ASYNC_HANDSHAKE;   }
+    void setAsyncHandshake(bool v)
+    {   setFlag(F_ASYNC_HANDSHAKE, v ? 1 : 0);  }
 
     SslConnection();
     ~SslConnection();

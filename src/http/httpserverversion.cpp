@@ -20,7 +20,7 @@
 #include <config.h>
 
 const char HttpServerVersion::s_pVersion[] = "LiteSpeed/" PACKAGE_VERSION
-        " Open";
+        " Enterprise";
 
 int  HttpServerVersion::s_iVersionLen = 9;
 

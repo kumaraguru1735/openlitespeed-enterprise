@@ -846,7 +846,7 @@ int HttpCgiTool::buildCommonEnv(IEnv *pEnv, HttpSession *pSession)
     }
 
     char sVer[40];
-    n = snprintf(sVer, 40, "Openlitespeed %s", PACKAGE_VERSION);
+    n = snprintf(sVer, 40, "LiteSpeed Enterprise %s", PACKAGE_VERSION);
     pEnv->add("LSWS_EDITION", 12, sVer, n);
     pEnv->add("X-LSCACHE", 9, "on,crawler", 10);
     count += 2;

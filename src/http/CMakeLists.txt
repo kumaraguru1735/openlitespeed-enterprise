@@ -58,6 +58,7 @@ SET(http_STAT_SRCS
    httpcontext.cpp
    httpserverversion.cpp
    vhostmap.cpp
+   jitconfigloader.cpp
    eventdispatcher.cpp
    staticfilehandler.cpp
    reqhandler.cpp

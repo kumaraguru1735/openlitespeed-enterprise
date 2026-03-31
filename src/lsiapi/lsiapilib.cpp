@@ -2572,7 +2572,7 @@ static void foreach_req_var_full(HttpSession *pSession,
         foreach_ssl_env(pSession, cb, arg);
 
     char sVer[40];
-    n = snprintf(sVer, 40, "Openlitespeed %s", PACKAGE_VERSION);
+    n = snprintf(sVer, 40, "LiteSpeed Enterprise %s", PACKAGE_VERSION);
     cb(-1, "LSWS_EDITION", 12, sVer, n, arg);
     cb(-1, "X-LSCACHE", 9, "1", 1, arg);
 

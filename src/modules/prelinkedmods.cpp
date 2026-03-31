@@ -22,6 +22,7 @@
 extern lsi_module_t modcompress;
 extern lsi_module_t moddecompress;
 extern lsi_module_t cache;
+extern lsi_module_t mod_esi;
 
 extern int addModgzipFilter(lsi_session_t *session, int isSend,
                             uint8_t compressLevel);
@@ -35,7 +36,8 @@ Prelinked_Module g_prelinked[] =
 {
     { "modcompress",    &modcompress   },
     { "moddecompress",  &moddecompress },
-    { "cache",          &cache         }
+    { "cache",          &cache         },
+    { "mod_esi",        &mod_esi       }
 
 };
 

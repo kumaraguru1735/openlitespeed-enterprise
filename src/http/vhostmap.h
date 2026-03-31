@@ -30,6 +30,7 @@
 class AutoBuf;
 class HttpVHost;
 class HttpVHostMap;
+class JitVHostMap;
 class WildMatch;
 class SslContext;
 
@@ -41,6 +42,7 @@ class VHostMap : private HashStringMap< HttpVHost * >, public RefCounter
     WildMatchList    *m_pWildMatches;
     SslContext       *m_pSslContext;
     UdpListener      *m_pQuicListener;
+    JitVHostMap      *m_pJitVHostMap;
     AutoStr2          m_sAddr;
     int               m_port;
     AutoStr2          m_sPort;
@@ -55,6 +57,7 @@ class VHostMap : private HashStringMap< HttpVHost * >, public RefCounter
     int removeWildMatch(const char *pName);
     HttpVHost *wildMatch(const char *pHost, const char *pEnd) const;
     void removeWildMatch(WildMatchList::iterator iter);
+    HttpVHost *jitLoadVHost(const char *pHost) const;
 
     void zconfAppendWildMatchList(GHash *pHash);
 public:
@@ -78,9 +81,22 @@ public:
         if (iter1 != end())
             return iter1.second();
         if (m_pWildMatches)
-            return wildMatch(pHost, pHostEnd);
+        {
+            HttpVHost *pMatch = wildMatch(pHost, pHostEnd);
+            if (pMatch)
+                return pMatch;
+        }
+        // Try JIT loading if enabled and no match found
+        if (m_pJitVHostMap)
+        {
+            HttpVHost *pJit = jitLoadVHost(pHost);
+            if (pJit)
+                return pJit;
+        }
         return m_pCatchAll;
     }
+
+    void setJitVHostMap(JitVHostMap *p)     { m_pJitVHostMap = p; }
 
     HttpVHost *exactMatchVHost(const char *pHost) const;
     HttpVHost *getCatchAll() const

@@ -302,6 +302,7 @@ public:
 
     int SSLAgain();
     int acceptSSL();
+    int tryAsyncSSLAccept();
     void handle_acceptSSL_EIO_Err();
 
     int get_url_from_reqheader(char *buf, int length, char **puri,

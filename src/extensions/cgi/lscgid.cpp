@@ -1184,7 +1184,7 @@ int lscgid_main(int fd, char *argv0, const char *secret, char *pSock)
 #ifdef IS_LSCPD
     strcpy(argv0, "lscpd (lscgid)");
 #else
-    strcpy(argv0, "openlitespeed (lscgid)");
+    strcpy(argv0, "lsws-enterprise (lscgid)");
 #endif
 #endif
 

@@ -42,6 +42,7 @@ class GSockAddr;
 class AutoStr2;
 class HttpContext;
 class HttpSession;
+class JitVHostMap;
 class LogFile;
 class AccessControl;
 class FcgiApp;
@@ -153,6 +154,7 @@ public:
     int getThreading();
     void addQuicEngine(QuicEngine *pEngine);
     QuicEngine *getQuicEngine() const;
+    JitVHostMap *getJitVHostMap() const;
 };
 
 LS_SINGLETON_DECL(HttpServer);

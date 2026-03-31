@@ -38,6 +38,7 @@
 #include <socket/gsockaddr.h>
 #include <sslpp/sslcontext.h>
 #include <sslpp/sslerror.h>
+#include <sslpp/sslasynchandshake.h>
 #include <util/accessdef.h>
 #include <util/datetime.h>
 #include <util/stringtool.h>
@@ -1886,7 +1887,7 @@ static char s_errUseSSL[] =
     "the plain HTTP scheme to access this URL.<br />\n"
     "<blockquote>Hint: The URL should starts with <b>https</b>://</blockquote> </p>\n"
     "<hr />\n"
-    "Powered By LiteSpeed Web Server<br />\n"
+    "Powered By LiteSpeed Enterprise Web Server<br />\n"
     "</body></html>\n";
 
 static char s_redirectSSL1[] =
@@ -2000,8 +2001,40 @@ void NtwkIOLink::enableTlsAccel()
 }
 
 
+int NtwkIOLink::tryAsyncSSLAccept()
+{
+    if (!SslAsyncHandshake::isEnabled())
+        return -1;  // Not enabled, caller should use sync path
+
+    if (m_ssl.isAsyncHandshake())
+        return 0;   // Already queued, waiting for completion
+
+    int ret = SslAsyncHandshake::queueHandshake(this, &m_ssl);
+    if (ret == 0)
+    {
+        m_ssl.setAsyncHandshake(true);
+        LS_DBG_L(this, "[SSL] handshake offloaded to worker thread.");
+        return 0;   // Successfully queued
+    }
+    return -1;      // Failed to queue, fall back to sync
+}
+
+
 int NtwkIOLink::acceptSSL()
 {
+    // Try async handshake offloading if enabled.
+    // If the handshake was already queued asynchronously, the event loop
+    // callback will resume this connection -- return 0 (want retry).
+    if (SslAsyncHandshake::isEnabled() && !m_ssl.isAsyncHandshake())
+    {
+        if (tryAsyncSSLAccept() == 0)
+            return 0;
+        // Fall through to synchronous path if queueing failed.
+    }
+
+    // Clear the async flag if we are re-entering after async completion
+    m_ssl.setAsyncHandshake(false);
+
     int ret = m_ssl.accept();
     if (ret == 1)
     {

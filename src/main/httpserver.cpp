@@ -80,6 +80,7 @@
 #include <http/staticfilecachedata.h>
 #include <http/stderrlogger.h>
 #include <http/vhostmap.h>
+#include <http/jitconfigloader.h>
 #include <http/clientinfo.h>
 
 #include <log4cxx/appender.h>
@@ -246,6 +247,7 @@ private:
     gid_t               m_pri_gid;
     HttpFetch          *m_pAutoUpdFetch[3];
     QuicEngine         *m_pQuicEngine;
+    JitVHostMap         m_jitVHostMap;
 
     HttpServerImpl(const HttpServerImpl &rhs);
     void operator=(const HttpServerImpl &rhs);
@@ -1213,6 +1215,21 @@ void HttpServerImpl::endConfig(int error)
     m_oldListeners.saveInUseListnersTo(m_toBeReleasedListeners);
     m_orgVHosts.appendTo(m_toBeReleasedVHosts);
     m_listeners.endConfig();
+
+    // If JIT vhost loading is enabled, attach the JIT map to all
+    // listener VHostMaps so matchVHost can trigger lazy loading.
+    if (m_jitVHostMap.isEnabled())
+    {
+        HttpListenerList::iterator iter;
+        for (iter = m_listeners.begin(); iter != m_listeners.end(); ++iter)
+        {
+            if (*iter)
+                (*iter)->getVHostMap()->setJitVHostMap(&m_jitVHostMap);
+        }
+        LS_NOTICE("JIT VHost: enabled with %d deferred vhost entries",
+                  m_jitVHostMap.size());
+    }
+
     ServerAddrRegistry::getInstance().init(&m_listeners);
 }
 
@@ -1457,7 +1474,7 @@ void HttpServerImpl::checkOLSUpdate()
     char sUrl[256];
     char osstr[64] = {0};
     char plat[64] = {0};
-    const char *httpUrl = "http://openlitespeed.org/";
+    const char *httpUrl = "https://github.com/kumaraguru1735/openlitespeed-enterprise/";
     addrResponder.setHttpUrl(httpUrl, strlen(httpUrl));
     addrResponder2.setHttpUrl(httpUrl, strlen(httpUrl));
     snprintf(sUrl, sizeof(sUrl), "%s%s%s%s%s%s%s%s%s", httpUrl,
@@ -1486,7 +1503,7 @@ void HttpServerImpl::checkOLSUpdate()
     m_pAutoUpdFetch[1]->setTimeout(15);  //Set Req timeout as 30 seconds
     m_pAutoUpdFetch[1]->setCallBack(autoUpdCheckCb, this);
     int curVer = readVersionStr(PACKAGE_VERSION);
-    snprintf(sUrl, 255, "http://openlitespeed.org/packages/relbr%d.%d?",
+    snprintf(sUrl, 255, "https://github.com/kumaraguru1735/openlitespeed-enterprise/releases/tag/v%d.%d?",
              curVer / 1000000, (curVer / 10000) % 100);
     m_pAutoUpdFetch[1]->startReq(sUrl, 1, 1, NULL, 0, sAutoUpdFile.c_str(), NULL,
                               addrResponder2);
@@ -3717,8 +3734,13 @@ int HttpServerImpl::configVHTemplates(const XmlNode *pRoot)
 int HttpServerImpl::configVHosts(const XmlNode *pRoot)
 {
     ConfigCtx currentCtx("server", "vhosts");
-    const XmlNode *pNode = pRoot->getChild("virtualHostList", 1);
 
+    // Check if JIT vhost loading is enabled
+    int jitEnabled = ConfigCtx::getCurConfigCtx()->getLongValue(
+                         pRoot, "jitVHost", 0, 1, 0);
+    m_jitVHostMap.setEnabled(jitEnabled);
+
+    const XmlNode *pNode = pRoot->getChild("virtualHostList", 1);
     const XmlNodeList *pList = pNode->getChildren("virtualHost");
 
     if (pList)
@@ -3728,14 +3750,56 @@ int HttpServerImpl::configVHosts(const XmlNode *pRoot)
         for (iter = pList->begin(); iter != pList->end(); ++iter)
         {
             const XmlNode *pVhostNode = *iter;
-            //m_achVhRoot[0] = 0;
             ConfigCtx::getCurConfigCtx()->clearVhRoot();
-            HttpVHost *pVHost = HttpVHost::configVHost(const_cast <XmlNode *>
-                                (pVhostNode));
 
-            if (pVHost)
+            if (jitEnabled)
             {
-                addVHost(pVHost);
+                // JIT mode: register config path without fully loading
+                const char *pName = pVhostNode->getChildValue("name");
+                if (!pName)
+                    continue;
+
+                const char *pVhRoot = pVhostNode->getChildValue("vhRoot");
+                const char *pConfFile = pVhostNode->getChildValue("configFile");
+
+                // Resolve the config file path
+                char achConfPath[MAX_PATH_LEN];
+                if (pConfFile)
+                {
+                    if (ConfigCtx::getCurConfigCtx()->getValidFile(
+                            achConfPath, pConfFile, "vhost config") != 0)
+                    {
+                        // Fall back to eager loading if config path invalid
+                        HttpVHost *pVHost = HttpVHost::configVHost(
+                            const_cast<XmlNode *>(pVhostNode));
+                        if (pVHost)
+                            addVHost(pVHost);
+                        continue;
+                    }
+                }
+                else
+                {
+                    // No separate config file - cannot defer, load eagerly
+                    HttpVHost *pVHost = HttpVHost::configVHost(
+                        const_cast<XmlNode *>(pVhostNode));
+                    if (pVHost)
+                        addVHost(pVHost);
+                    continue;
+                }
+
+                const char *pDomain = pVhostNode->getChildValue("vhDomain");
+                const char *pAliases = pVhostNode->getChildValue("vhAliases");
+
+                m_jitVHostMap.addEntry(pName, achConfPath, pVhRoot,
+                                       pDomain, pAliases);
+            }
+            else
+            {
+                // Standard eager loading
+                HttpVHost *pVHost = HttpVHost::configVHost(
+                    const_cast<XmlNode *>(pVhostNode));
+                if (pVHost)
+                    addVHost(pVHost);
             }
         }
     }
@@ -3996,6 +4060,49 @@ int HttpServerImpl::configServerBasics(int reconfig, const XmlNode *pRoot)
         HttpServerConfig::getInstance().setCpuAffinity(
             ConfigCtx::getCurConfigCtx()->getLongValue(pRoot, "cpuAffinity", 0,
                                                        64, 0));
+
+        // cpuAffinityMode: 0=disabled, 1=auto (default, uses cpuAffinity
+        // count), 2=manual (uses cpuAffinityList).
+        // When cpuAffinity > 0 and cpuAffinityMode is not explicitly set,
+        // the mode defaults to 1 (auto) for backward compatibility.
+        {
+            long affinityMode = ConfigCtx::getCurConfigCtx()->getLongValue(
+                pRoot, "cpuAffinityMode", 0, 2, -1);
+            if (affinityMode < 0)
+            {
+                // Not set explicitly -- infer from legacy cpuAffinity value.
+                affinityMode = (HttpServerConfig::getInstance().getCpuAffinity() > 0)
+                               ? 1 : 0;
+            }
+            HttpServerConfig::getInstance().setCpuAffinityMode(affinityMode);
+            LS_INFO(ConfigCtx::getCurConfigCtx(),
+                    "cpuAffinityMode: %ld", affinityMode);
+
+            if (affinityMode == 2)
+            {
+                const char *pList = ConfigCtx::getCurConfigCtx()->getTag(
+                    pRoot, "cpuAffinityList", 0, 0);
+                if (pList && *pList)
+                {
+                    HttpServerConfig::getInstance().setCpuAffinityList(pList);
+                    LS_INFO(ConfigCtx::getCurConfigCtx(),
+                            "cpuAffinityList: %s", pList);
+                }
+                else
+                {
+                    LS_WARN(ConfigCtx::getCurConfigCtx(),
+                            "cpuAffinityMode is 2 (manual) but "
+                            "cpuAffinityList is not set, falling back to auto.");
+                    HttpServerConfig::getInstance().setCpuAffinityMode(1);
+                }
+            }
+        }
+
+        HttpServerConfig::getInstance().setSslAsyncHandshake(
+            ConfigCtx::getCurConfigCtx()->getLongValue(pRoot,
+                "sslAsyncHandshake", 0, 1, 0));
+        LS_INFO(ConfigCtx::getCurConfigCtx(), "sslAsyncHandshake: %d",
+                HttpServerConfig::getInstance().getSslAsyncHandshake());
 
         val = ConfigCtx::getCurConfigCtx()->getLongValue(pRoot, "bubbleWrap",
                 0, 2, HttpServerConfig::BWRAP_DISABLED);
@@ -6159,3 +6266,6 @@ void HttpServer::addQuicEngine(QuicEngine *pEngine)
 
 QuicEngine *HttpServer::getQuicEngine() const
 {   return m_impl->getQuicEngine();     }
+
+JitVHostMap *HttpServer::getJitVHostMap() const
+{   return &m_impl->m_jitVHostMap;      }

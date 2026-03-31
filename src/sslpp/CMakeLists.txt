@@ -16,6 +16,7 @@ SET(sslpp_STAT_SRCS
    sslticket.cpp
    sslutil.cpp
    sslasyncpk.cpp
+   sslasynchandshake.cpp
    ocsp/ocsp.c
    ls_fdbuf_bio.c
 )

@@ -55,6 +55,7 @@
 #include <util/httpfetch.h>
 #include <socket/gsockaddr.h>
 #include <edio/evtcbque.h>
+#include <sslpp/sslasynchandshake.h>
 
 #if defined(linux) || defined(__linux) || defined(__linux__) || defined(__gnu_linux__)
 //For non-linux, we do not need this include file
@@ -1008,7 +1009,7 @@ int LshttpdMain::init(int argc, char *argv[])
         if (m_pidFile.writePid(m_pid))
             return 2;
         PidFile varRunPid;
-        varRunPid.writePidFile("/var/run/openlitespeed.pid", m_pid);
+        varRunPid.writePidFile("/var/run/lsws-enterprise.pid", m_pid);
         varRunPid.closePidFile();
 
         if (!MainServerConfig::getInstance().getDisableWebAdmin())
@@ -1054,7 +1055,7 @@ int LshttpdMain::init(int argc, char *argv[])
 #ifdef IS_LSCPD
     strcpy(argv[0], "lscpd (lscpd - main)");
 #else
-    strcpy(argv[0], "openlitespeed (lshttpd - main)");
+    strcpy(argv[0], "lsws-enterprise (lshttpd - main)");
 #endif
 #endif
     //if ( !m_noCrashGuard && ( m_pBuilder->getCrashGuard() ))
@@ -1081,6 +1082,9 @@ int LshttpdMain::init(int argc, char *argv[])
         EvtcbQue::getInstance().initNotifier();
         initAio();
         cleanEnvVars();
+
+        if (HttpServerConfig::getInstance().getSslAsyncHandshake())
+            SslAsyncHandshake::init(4);
 
         WorkCrew * pGWC = ModuleHandler::getGlobalWorkCrew();
         pGWC->startProcessing();
@@ -1300,15 +1304,71 @@ void LshttpdMain::onNewChildStart(ChildProc * pProc)
     pProc->m_pid = getpid();
     HttpLog::updateLogPatternWithPid(pProc->m_pid);
 
-    int cpu_count = HttpServerConfig::getInstance().getCpuAffinity();
-    if (cpu_count > 0)
+    int affinityMode = HttpServerConfig::getInstance().getCpuAffinityMode();
+    if (affinityMode == 1)
     {
-        cpu_set_t       cpu_affinity;
-
-        PCUtil::getAffinityMask(s_iCpuCount, pProc->m_iProcNo - 1, cpu_count,
-                                &cpu_affinity);
-        PCUtil::setCpuAffinity(&cpu_affinity);
+        // Auto mode: distribute CPUs based on process number and cpu_count.
+        int cpu_count = HttpServerConfig::getInstance().getCpuAffinity();
+        if (cpu_count > 0)
+        {
+            cpu_set_t       cpu_affinity;
+            PCUtil::getAffinityMask(s_iCpuCount, pProc->m_iProcNo - 1,
+                                    cpu_count, &cpu_affinity);
+            PCUtil::setCpuAffinity(&cpu_affinity);
+        }
     }
+    else if (affinityMode == 2)
+    {
+        // Manual mode: parse comma-separated CPU list and assign
+        // to this worker process in round-robin fashion.
+        const char *pList = HttpServerConfig::getInstance().getCpuAffinityList();
+        if (pList)
+        {
+            cpu_set_t mask;
+            CPU_ZERO(&mask);
+
+            // Parse the list: "0,2,4,6" or "1-3,5" style
+            // For simplicity, support comma-separated integers and ranges.
+            const char *p = pList;
+            int cpusParsed = 0;
+
+            while (*p)
+            {
+                while (*p == ' ' || *p == ',')
+                    ++p;
+                if (!*p)
+                    break;
+
+                int start = atoi(p);
+                while (*p >= '0' && *p <= '9')
+                    ++p;
+
+                int end = start;
+                if (*p == '-')
+                {
+                    ++p;
+                    end = atoi(p);
+                    while (*p >= '0' && *p <= '9')
+                        ++p;
+                }
+
+                for (int cpu = start; cpu <= end && cpu < CPU_SETSIZE; ++cpu)
+                {
+                    CPU_SET(cpu, &mask);
+                    ++cpusParsed;
+                }
+            }
+
+            if (cpusParsed > 0)
+            {
+                PCUtil::setCpuAffinity(&mask);
+                LS_DBG_L("[main] Manual CPU affinity set for worker %d, "
+                         "%d CPUs from list: %s",
+                         pProc->m_iProcNo, cpusParsed, pList);
+            }
+        }
+    }
+    // affinityMode == 0: disabled, no affinity set.
     setpgid(0, 0);
     m_pServer->setBlackBoard(pProc->m_pBlackBoard);
     m_pServer->setProcNo(pProc->m_iProcNo);
@@ -1321,6 +1381,10 @@ void LshttpdMain::onNewChildStart(ChildProc * pProc)
     m_pServer->enableAioLogging();
     EvtcbQue::getInstance().initNotifier();
     initAio();
+
+    if (HttpServerConfig::getInstance().getSslAsyncHandshake())
+        SslAsyncHandshake::init(4);
+
     if (m_fdAdmin != -1)
     {
         close(m_fdAdmin);
@@ -1330,7 +1394,7 @@ void LshttpdMain::onNewChildStart(ChildProc * pProc)
 #ifdef IS_LSCPD
     snprintf(argv0, 80, "lscpd (lscpd - #%02d)", pProc->m_iProcNo);
 #else
-    snprintf(argv0, 80, "openlitespeed (lshttpd - #%02d)", pProc->m_iProcNo);
+    snprintf(argv0, 80, "lsws-enterprise (lshttpd - #%02d)", pProc->m_iProcNo);
 #endif
 
     LsShmPool::setPid(pProc->m_pid);

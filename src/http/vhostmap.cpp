@@ -20,6 +20,7 @@
 #include <lsdef.h>
 #include <http/httpvhost.h>
 #include <http/httpvhostlist.h>
+#include <http/jitconfigloader.h>
 #include <log4cxx/logger.h>
 #include <lsr/ls_strtool.h>
 #include <main/zconfmanager.h>
@@ -74,6 +75,7 @@ VHostMap::VHostMap()
     , m_pWildMatches(NULL)
     , m_pSslContext(NULL)
     , m_pQuicListener(NULL)
+    , m_pJitVHostMap(NULL)
     , m_port(0)
     , m_iNamedVH(0)
     , m_iStripWWW(1)
@@ -918,6 +920,23 @@ int VHostMap::zconfAppendDomainMap(AutoBuf *pBuf, char isSsl)
 
     return 1;
 }
+
+HttpVHost *VHostMap::jitLoadVHost(const char *pHost) const
+{
+    if (!m_pJitVHostMap || !m_pJitVHostMap->isEnabled())
+        return NULL;
+
+    HttpVHost *pVHost = m_pJitVHostMap->loadVHost(pHost);
+    if (pVHost)
+    {
+        LS_DBG_L("JIT VHost: loaded vhost for domain [%s] on demand", pHost);
+        // The vhost has been added to the server's vhost map and listener
+        // mappings by the JIT loader, so on subsequent requests the normal
+        // hash lookup path will find it.
+    }
+    return pVHost;
+}
+
 
 void SubIpMap::setDefaultSslCtx(SslContext *pContext)
 {
