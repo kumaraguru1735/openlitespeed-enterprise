@@ -747,9 +747,27 @@ int HttpReq::parseURL(const char *pCur, const char *pBEnd)
 int HttpReq::parseURI(const char *pCur, const char *pBEnd)
 {
     int len = pBEnd - pCur;
+
+    // Reject null bytes in the raw URI before unescaping (literal \0)
+    if (memchr(pCur, 0, len))
+    {
+        LS_INFO(getLogSession(),
+                "Status 400: null byte in URI (raw)!");
+        return SC_400;
+    }
+
     char *p = (char *)ls_xpool_alloc(m_pPool, len + URL_INDEX_PAD);
     int n = HttpUtil::unescape(p, len, pCur);
     --n;
+
+    // Reject null bytes after URL-decoding (catches %00)
+    if (memchr(p, 0, n))
+    {
+        LS_INFO(getLogSession(),
+                "Status 400: null byte in URI (decoded)!");
+        return SC_400;
+    }
+
     n = GPath::clean(p, n);
     if (n <= 0)
         return SC_400;
@@ -848,6 +866,20 @@ int HttpReq::processHeaderLines()
     while ((pLineEnd  = (const char *)memchr(pLineBegin, '\n',
                         pBEnd - pLineBegin)) != NULL)
     {
+        // Reject lone LF (not preceded by CR) to prevent HTTP request
+        // smuggling.  A bare LF in a header line is ambiguous: the front-end
+        // and back-end may disagree on where a header ends, allowing an
+        // attacker to inject a second request.  The blank terminator line
+        // (\n at pLineBegin, or \r\n) is exempt because it contains no
+        // header content.
+        if (pLineEnd > pLineBegin && *(pLineEnd - 1) != '\r')
+        {
+            LS_INFO(getLogSession(),
+                    "Status 400: bare LF without CR in request header, "
+                    "possible request smuggling attempt!");
+            return SC_400;
+        }
+
         pColon = (const char *)memchr(pLineBegin, ':', pLineEnd - pLineBegin);
         if (pColon != NULL)
         {

@@ -81,6 +81,53 @@ StaticFileHandler::~StaticFileHandler()
 {}
 
 
+// Check if file path ends with a pre-compressed extension (.gz or .br).
+// Returns 1 for gzip, 2 for brotli, 0 for neither.
+// If compressed, pBaseSuffixEnd is set to point just before the compressed
+// extension's dot so the caller can locate the base suffix.
+static int detectPreCompressedExt(const char *pPath, int pathLen,
+                                  const char **pBaseSuffixEnd)
+{
+    if (!pPath || pathLen < 4)
+        return 0;
+    const char *pEnd = pPath + pathLen;
+    if (pathLen >= 4 && pEnd[-3] == '.' && pEnd[-2] == 'g' && pEnd[-1] == 'z')
+    {
+        *pBaseSuffixEnd = pEnd - 3;
+        return 1; // gzip
+    }
+    if (pathLen >= 4 && pEnd[-3] == '.' && pEnd[-2] == 'b' && pEnd[-1] == 'r')
+    {
+        *pBaseSuffixEnd = pEnd - 3;
+        return 2; // brotli
+    }
+    return 0;
+}
+
+
+// Find the base suffix from a pre-compressed file path.
+// E.g., for "/path/app.js.gz", baseSuffixEnd points to ".gz",
+// this returns "js".
+static const char *findBaseSuffix(const char *pPath,
+                                  const char *pBaseSuffixEnd)
+{
+    const char *pCur = pBaseSuffixEnd;
+    const char *pMin = pPath;
+    if (pCur - pMin > 32)
+        pMin = pCur - 32;
+    while (pCur > pMin)
+    {
+        char ch = *(pCur - 1);
+        if (ch == '/')
+            break;
+        if (ch == '.')
+            return pCur;
+        --pCur;
+    }
+    return NULL;
+}
+
+
 inline int buildStaticFileHeaders(HttpResp *pResp, HttpReq *pReq,
                                   SendFileInfo *pSendfileInfo)
 {
@@ -100,12 +147,54 @@ inline int buildStaticFileHeaders(HttpResp *pResp, HttpReq *pReq,
                                 p + 15, RFC_1123_TIME_LEN);
     p += 15 + RFC_1123_TIME_LEN + 2;
 
-    if (pData->getMimeType() != HttpMime::getBlank()
-        && pResp->getRespHeaders().getHeader(HttpRespHeaders::H_CONTENT_TYPE,
-                                            &iETagLen) == NULL)
-        pResp->getRespHeaders().add(HttpRespHeaders::H_CONTENT_TYPE,
-                                    p + 14, pData->getHeaderLen() -
-                                    (p - pData->getHeaderBuf()) - 14 - 2);
+    // Check if this is a pre-compressed file (.js.gz, .css.br, etc.)
+    // If so, override Content-Type with the base extension's MIME type
+    // and add the appropriate Content-Encoding header.
+    int useDefaultCt = 1;
+    const AutoStr2 *pRealPath = pData->getRealPath();
+    if (pRealPath)
+    {
+        const char *pBaseSuffixEnd = NULL;
+        int compressType = detectPreCompressedExt(pRealPath->c_str(),
+                                                  pRealPath->len(),
+                                                  &pBaseSuffixEnd);
+        if (compressType && pBaseSuffixEnd)
+        {
+            const char *pBaseSuffix = findBaseSuffix(pRealPath->c_str(),
+                                                     pBaseSuffixEnd);
+            if (pBaseSuffix)
+            {
+                const char *pBaseMime = pReq->getMimeBySuffix(pBaseSuffix);
+                if (pBaseMime)
+                {
+                    int ctLen;
+                    if (pResp->getRespHeaders().getHeader(
+                            HttpRespHeaders::H_CONTENT_TYPE, &ctLen) == NULL)
+                    {
+                        pResp->getRespHeaders().add(
+                            HttpRespHeaders::H_CONTENT_TYPE,
+                            pBaseMime, strlen(pBaseMime));
+                    }
+                    // Add Content-Encoding header
+                    if (compressType == 1)
+                        pResp->addGzipEncodingHeader();
+                    else
+                        pResp->addBrotliEncodingHeader();
+                    useDefaultCt = 0;
+                }
+            }
+        }
+    }
+
+    if (useDefaultCt)
+    {
+        if (pData->getMimeType() != HttpMime::getBlank()
+            && pResp->getRespHeaders().getHeader(HttpRespHeaders::H_CONTENT_TYPE,
+                                                &iETagLen) == NULL)
+            pResp->getRespHeaders().add(HttpRespHeaders::H_CONTENT_TYPE,
+                                        p + 14, pData->getHeaderLen() -
+                                        (p - pData->getHeaderBuf()) - 14 - 2);
+    }
 
     p = pSendfileInfo->getECache()->getCLHeader().c_str();
     pResp->getRespHeaders().add(HttpRespHeaders::H_CONTENT_LENGTH, p + 16,

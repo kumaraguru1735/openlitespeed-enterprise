@@ -166,7 +166,17 @@ int LocalWorkerConfig::checkExtAppSelfManagedAndFixEnv(int maxIdleTime)
     }
 
 
-    if (pEnvValue)
+    if (!pEnvValue)
+    {
+        // No PHP_LSAPI_CHILDREN / LSAPI_CHILDREN env var set;
+        // set a sensible default so PHP workers function correctly.
+        LS_NOTICE(ConfigCtx::getCurConfigCtx(),
+                  "PHP_LSAPI_CHILDREN is not set, defaulting to 10.");
+        pEnv->add("PHP_LSAPI_CHILDREN=10");
+        pEnvValue = "10";
+        i = 1; // index of "PHP_LSAPI_CHILDREN" in instanceEnv[]
+    }
+
     {
         int children = atol(pEnvValue);
 

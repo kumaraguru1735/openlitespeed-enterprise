@@ -36,10 +36,10 @@
 
 
 int ClientInfo::s_iSoftLimitPC = INT_MAX;
-int ClientInfo::s_iHardLimitPC = 100;
-int ClientInfo::s_iOverLimitGracePeriod = 10;
-int ClientInfo::s_iBanPeriod = 60;
-uint16_t ClientInfo::s_iMaxAllowedBotHits = 3;
+int ClientInfo::s_iHardLimitPC = 10000;
+int ClientInfo::s_iOverLimitGracePeriod = 15;
+int ClientInfo::s_iBanPeriod = 300;
+uint16_t ClientInfo::s_iMaxAllowedBotHits = 10;
 int ClientInfo::s_iAntiDdosCaptcha = 0;
 
 #if 0

@@ -63,7 +63,7 @@ END_LOG4CXX_NS
 #define VH_STRICT_OWNER     (1<<15)
 #define VH_NS               (1<<16)
 
-#define MAX_VHOST_PHP_NUM    100
+#define MAX_VHOST_PHP_NUM    1000
 
 
 #define DETACH_MODE_MIN_MAX_IDLE 30
@@ -105,7 +105,7 @@ template< class T >
 class THash;
 class StaticFileCacheData;
 
-#define MAX_ACCESS_LOG    4
+#define MAX_ACCESS_LOG    32
 
 
 struct php_xml_st

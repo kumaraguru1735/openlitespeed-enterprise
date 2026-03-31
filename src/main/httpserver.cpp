@@ -2750,10 +2750,10 @@ int HttpServerImpl::configTuning(const XmlNode *pRoot)
     }
 
     //connections
-    setMaxConns(currentCtx.getLongValue(pNode, "maxConnections", 1, 1000000,
-                                        2000));
+    setMaxConns(currentCtx.getLongValue(pNode, "maxConnections", 1, INT_MAX,
+                                        100000));
     setMaxSSLConns(currentCtx.getLongValue(pNode, "maxSslConnections", 0,
-                                           1000000, 1000));
+                                           INT_MAX, 100000));
     HttpListener::setSockSendBufSize(
         currentCtx.getLongValue(pNode, "sndBufSize", 0, 512 * 1024, 0));
     HttpListener::setSockRecvBufSize(
@@ -3521,6 +3521,11 @@ int HttpServerImpl::configServerBasic2(const XmlNode *pRoot,
         }
 
         configSecurity(pRoot);
+
+        // Load server-level custom error pages so vhosts can inherit them
+        pNode = pRoot->getChild("customErrorPages", 1);
+        if (pNode)
+            m_serverContext.configErrorPages(pNode);
 
         sv = currentCtx.getLongValue(pRoot, "autoDetectCdn", 0, 3, 3);
         if (sv & 1)

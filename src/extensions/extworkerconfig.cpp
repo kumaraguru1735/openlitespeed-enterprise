@@ -199,7 +199,7 @@ void ExtWorkerConfig::removeUnusedSocket()
 void ExtWorkerConfig::config(const XmlNode *pNode)
 {
     int iMaxConns = ConfigCtx::getCurConfigCtx()->getLongValue(pNode,
-                    "maxConns", 1, 10000, 5);
+                    "maxConns", 1, 100000, 10);
     int iRetryTimeout = ConfigCtx::getCurConfigCtx()->getLongValue(pNode,
                         "retryTimeout", 0, LONG_MAX, 10);
     int iInitTimeout = ConfigCtx::getCurConfigCtx()->getLongValue(pNode,

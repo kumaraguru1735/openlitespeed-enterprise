@@ -35,7 +35,7 @@ class ExtWorker;
 #define LSAPI_DAEMON_PROCESSGROUP   2
 
 // Default config values
-#define LSAPI_DAEMON_MAX_CHILDREN       5
+#define LSAPI_DAEMON_MAX_CHILDREN       100
 #define LSAPI_DAEMON_MAX_IDLE_TIME      300
 #define LSAPI_DAEMON_MAX_REQS           10000
 #define LSAPI_DAEMON_SOCK_DIR           "/tmp/lshttpd/"
