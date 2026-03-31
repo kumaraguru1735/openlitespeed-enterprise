@@ -745,6 +745,12 @@ int AccessControl::addList(const char *pList, int allow)
 
 int AccessControl::hasAccess(const in6_addr &ip) const
 {
+    // If this is an IPv4-mapped IPv6 address (::ffff:x.x.x.x),
+    // check against IPv4 rules first to ensure allow/deny lists work
+    // correctly for clients connecting via IPv4-mapped IPv6.
+    if (IN6_IS_ADDR_V4MAPPED(&ip))
+        return hasAccess(((Addr6 *)&ip)->m_addrs[3]);
+
     if (m_pIp6Ctrl)
     {
         IP6AccessControl::iterator iter = m_pIp6Ctrl->find(&ip);

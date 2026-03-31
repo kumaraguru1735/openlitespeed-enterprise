@@ -575,8 +575,13 @@ int DirHashCacheStore::saveEntry(CacheEntry *pEntry)
 void DirHashCacheStore::removePermEntry(CacheEntry *pEntry)
 {
     char achBuf[4096];
-    buildCacheLocation(achBuf, 4096, pEntry->getHashKey().getKey(),
+    int n = buildCacheLocation(achBuf, 4096, pEntry->getHashKey().getKey(),
                        pEntry->isPrivate());
+    unlink(achBuf);
+    // Also remove stale (.S) and temp (.tmp) swap files
+    lstrncpy(&achBuf[n], ".S", sizeof(achBuf) - n);
+    unlink(achBuf);
+    lstrncpy(&achBuf[n], ".tmp", sizeof(achBuf) - n);
     unlink(achBuf);
 }
 
@@ -766,10 +771,17 @@ void DirHashCacheStore::removeEntryByHash(const unsigned char *pKey, int isPriva
 {
     char achBuf[4096];
     char *pathEnd;
-    pathEnd = &achBuf[0] + buildCacheLocation(achBuf, 4096, pKey, isPrivate);
+    int n = buildCacheLocation(achBuf, 4096, pKey, isPrivate);
+    pathEnd = &achBuf[0] + n;
 
     g_api->log(NULL, LSI_LOG_DEBUG, "[CACHE] remove cache object [%s].\n", achBuf);
     unlink(achBuf);
+    // Also remove stale (.S) and temp (.tmp) swap files
+    lstrncpy(&achBuf[n], ".S", sizeof(achBuf) - n);
+    unlink(achBuf);
+    lstrncpy(&achBuf[n], ".tmp", sizeof(achBuf) - n);
+    unlink(achBuf);
+    achBuf[n] = 0;
 
     pathEnd -= 2 * HASH_KEY_LEN + 1;
     assert(*pathEnd == '/');
@@ -791,8 +803,20 @@ void DirHashCacheStore::removeDeadEntry(CacheEntry *pEntry,
 {
     getManager()->removeTracking((const char *)hash.getKey(),
                                     HASH_KEY_LEN, pEntry->isPrivate());
+    int n = 0;
     if (!achBuf[0])
-        buildCacheLocation(achBuf, 4096, hash.getKey(), pEntry->isPrivate());
+        n = buildCacheLocation(achBuf, 4096, hash.getKey(), pEntry->isPrivate());
+    else
+        n = strlen(achBuf);
     delete pEntry;
     unlink(achBuf);
+    // Also remove stale (.S) and temp (.tmp) swap files
+    if (n > 0 && n < 4090)
+    {
+        lstrncpy(&achBuf[n], ".S", 4096 - n);
+        unlink(achBuf);
+        lstrncpy(&achBuf[n], ".tmp", 4096 - n);
+        unlink(achBuf);
+        achBuf[n] = 0;
+    }
 }

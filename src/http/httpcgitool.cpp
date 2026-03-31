@@ -203,6 +203,9 @@ int HttpCgiTool::processHeaderLine2(HttpExtConnector *pExtConn,
             pReq->orGzip(UPSTREAM_GZIP);
         else if (strncasecmp(pValue, "deflate", 7) == 0)
             pReq->orGzip(UPSTREAM_DEFLATE);
+        else if (strncasecmp(pValue, "br", 2) == 0
+                 && (valLen == 2 || !isalpha(*(pValue + 2))))
+            pReq->orBr(UPSTREAM_BR);
 //             if ( !(pReq->gzipAcceptable() & REQ_GZIP_ACCEPT) )
 //                 return 0;
 //         }

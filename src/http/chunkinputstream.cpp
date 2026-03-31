@@ -245,13 +245,15 @@ int ChunkInputStream::skipTrailer()
 {
     char achBuf[128];
     int ret;
+    char *pBegin = NULL;
+    char *pEnd = NULL;
     while (true)
     {
         ret = bufRead(achBuf, sizeof(achBuf), 1);
         if (ret <= 0)
             return ret;
-        char *pBegin = achBuf;
-        char *pEnd = &achBuf[ret];
+        pBegin = achBuf;
+        pEnd = &achBuf[ret];
         while (pBegin < pEnd)
         {
             switch (m_iRemain)
@@ -273,7 +275,10 @@ int ChunkInputStream::skipTrailer()
                 {
                     m_iChunkLen = CHUNK_EOF;
                     m_iRemain = 0;
-                    return 1;
+                    ++pBegin;
+                    // Issue #402: Preserve any remaining data in the
+                    // buffer for the next pipelined request.
+                    goto SAVE_REMAINING;
                 }
                 else
                     m_iRemain = -3;
@@ -284,7 +289,10 @@ int ChunkInputStream::skipTrailer()
                 {
                     m_iChunkLen = CHUNK_EOF;
                     m_iRemain = 0;
-                    return 1;
+                    ++pBegin;
+                    // Issue #402: Preserve any remaining data in the
+                    // buffer for the next pipelined request.
+                    goto SAVE_REMAINING;
                 }
                 else
                     m_iRemain = -3;
@@ -295,6 +303,41 @@ int ChunkInputStream::skipTrailer()
             }
         }
     }
+
+SAVE_REMAINING:
+    // Issue #402: Any bytes remaining in achBuf after the chunk
+    // terminator belong to the next pipelined request. Save them
+    // into m_achChunkLenBuf so the caller can retrieve them via
+    // getChunkLenBuf() / getBufSize().
+    {
+        int remaining = pEnd - pBegin;
+        if (remaining > 0)
+        {
+            // Consolidate existing prefetched data in m_achChunkLenBuf.
+            int existLen = m_iBufLen - m_iBufUsed;
+            if (existLen < 0)
+                existLen = 0;
+
+            // Clamp to buffer capacity.
+            if (remaining > MAX_CHUNK_LEN_BUF_SIZE)
+                remaining = MAX_CHUNK_LEN_BUF_SIZE;
+            int canKeep = MAX_CHUNK_LEN_BUF_SIZE - remaining;
+            if (existLen > canKeep)
+                existLen = canKeep;
+
+            // Shift existing prefetched data right to make room,
+            // then copy the achBuf remainder into the front.
+            if (existLen > 0)
+            {
+                memmove(&m_achChunkLenBuf[remaining],
+                        &m_achChunkLenBuf[m_iBufUsed], existLen);
+            }
+            memmove(m_achChunkLenBuf, pBegin, remaining);
+            m_iBufLen = remaining + existLen;
+            m_iBufUsed = 0;
+        }
+    }
+    return 1;
 }
 
 

@@ -1671,8 +1671,33 @@ LocalWorker *HttpVHost::addRailsApp(const char *pAppName, const char *appPath,
     setDefaultConfig(config, pRailsRunner, maxConns, maxIdle, pAppDefault);
 
     config.clearEnv();
+
+    // Issue #409: Apply system defaults FIRST as a base layer.
+    // Custom env added afterward will override matching defaults.
+    config.getEnv()->add(pAppDefault->getEnv());
+
+    // Apply custom env on top of defaults so custom values win.
+    // Use addNonExist in reverse: for each custom var, update the
+    // existing default entry (or add if new).
     if (pEnv)
-        config.getEnv()->add(pEnv);
+    {
+        for (int i = 0; i < pEnv->size(); ++i)
+        {
+            const char *entry = (*pEnv)[i];
+            if (!entry)
+                continue;
+            const char *eq = strchr(entry, '=');
+            if (!eq)
+                continue;
+            int nameLen = eq - entry;
+            char name[1024];
+            if (nameLen >= (int)sizeof(name))
+                continue;
+            memcpy(name, entry, nameLen);
+            name[nameLen] = '\0';
+            config.getEnv()->update(name, eq + 1);
+        }
+    }
 
     {
         achFileName[pathLen] = 0;
@@ -1716,7 +1741,6 @@ LocalWorker *HttpVHost::addRailsApp(const char *pAppName, const char *appPath,
              &achFileName[m_sChroot.len()]);
     config.addEnvIfNotExist(achName, "LS_STDERR_LOG");
 
-    config.getEnv()->addNonExist(pAppDefault->getEnv());
     config.addEnv(NULL);
     config.setUGid(getUid(), getGid());
     config.setRunOnStartUp(runOnStart);

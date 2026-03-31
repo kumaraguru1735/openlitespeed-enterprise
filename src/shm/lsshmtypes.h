@@ -133,7 +133,7 @@ typedef v2_comp                 LsShmValComp_fn;
 
 #define LSSHM_MINSPACE          0x2000          // minimum SHM SIZE
 
-#define LSSHM_MAXSIZE           2000000000      // max size in memory allocation
+#define LSSHM_MAXSIZE           0x7F000000      // ~2032 MB max SHM (uint32_t offset limit)
 
 #define LSSHM_MAXERRMSG         4096            // max error message len
 

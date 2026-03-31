@@ -4289,6 +4289,12 @@ int HttpSession::setupGzipFilter()
             clearFlag(HSF_RESP_BODY_GZIPCOMPRESSED);
         }
     }
+    else if (m_request.brAcceptable() & UPSTREAM_BR)
+    {
+        // Backend already sent brotli-compressed response, do not re-compress
+        setFlag(HSF_RESP_BODY_GZIPCOMPRESSED);
+        return 0;
+    }
     else
         clearFlag(HSF_RESP_BODY_GZIPCOMPRESSED);
 
@@ -6171,7 +6177,9 @@ int HttpSession::contentEncodingFixup()
             requireChunk = 1;
         }
     }
-    else if (!pContentEncoding && updateContentCompressible())
+    else if (!pContentEncoding
+             && !(m_request.brAcceptable() & UPSTREAM_BR)
+             && updateContentCompressible())
     {
         if (m_response.getContentLen() > 200)// && getReq()->getStatusCode() < SC_400)
         {

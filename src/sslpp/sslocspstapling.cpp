@@ -191,6 +191,8 @@ SslOcspStapling::SslOcspStapling()
     , m_statTime(0)
     , m_nextUpdate(0)
     , m_pCertId(NULL)
+    , m_certInode(0)
+    , m_certMtime(0)
 {
 }
 
@@ -257,6 +259,39 @@ int SslOcspStapling::update()
         return 0;
 
     m_statTime = DateTime::s_curTime;
+
+    // Issue #332: Detect certificate changes when symlinks are updated
+    // (e.g., certbot renewal). Resolve the cert file path and check if
+    // the underlying file's inode or mtime has changed.
+    if (m_sCertName.c_str() && m_sCertName.c_str()[0])
+    {
+        char resolvedPath[PATH_MAX];
+        if (realpath(m_sCertName.c_str(), resolvedPath) != NULL)
+        {
+            struct stat certSt;
+            if (::stat(resolvedPath, &certSt) == 0)
+            {
+                if (m_certInode != 0
+                    && (certSt.st_ino != m_certInode
+                        || certSt.st_mtime != m_certMtime))
+                {
+                    LS_NOTICE("[OCSP] %s: Certificate file changed "
+                              "(inode: %lu -> %lu, mtime: %ld -> %ld), "
+                              "invalidating OCSP response.\n",
+                              m_sCertName.c_str(),
+                              (unsigned long)m_certInode,
+                              (unsigned long)certSt.st_ino,
+                              (long)m_certMtime,
+                              (long)certSt.st_mtime);
+                    releaseRespData();
+                    if (::stat(m_sRespfile.c_str(), &st) == 0)
+                        unlink(m_sRespfile.c_str());
+                }
+                m_certInode = certSt.st_ino;
+                m_certMtime = certSt.st_mtime;
+            }
+        }
+    }
 
     if (::stat(m_sRespfile.c_str(), &st) == 0)
     {

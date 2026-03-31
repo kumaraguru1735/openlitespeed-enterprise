@@ -21,6 +21,7 @@
 #define SSLOCSPSTAPLING_H
 #include <socket/gsockaddr.h>
 #include <util/autostr.h>
+#include <sys/types.h>
 #include <time.h>
 
 class SslContext;
@@ -83,6 +84,8 @@ private:
     time_t          m_statTime;
     time_t          m_nextUpdate;
     OCSP_CERTID    *m_pCertId;
+    ino_t           m_certInode;    // Issue #332: track resolved cert inode
+    time_t          m_certMtime;    // Issue #332: track resolved cert mtime
     static const struct sockaddr *s_proxy_addr;
 
 };

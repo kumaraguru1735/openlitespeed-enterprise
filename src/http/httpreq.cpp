@@ -3940,9 +3940,14 @@ int HttpReq::createHeaderValue(HttpSession *pSession, const char *pFmt, int len,
             break;
         case '{':
             pEnvNameEnd = (char *)memchr(pFmt + 1, '}', pEnd - pFmt - 1);
-            if (pEnvNameEnd && (*(pEnvNameEnd + 1) == 'e'
-                                || *(pEnvNameEnd + 1) == 's'))
+            if (pEnvNameEnd)
             {
+                int hasSuffix = 0;
+                if (pEnvNameEnd + 1 < pEnd
+                    && (*(pEnvNameEnd + 1) == 'e'
+                        || *(pEnvNameEnd + 1) == 's'))
+                    hasSuffix = 1;
+
                 const char *env_name = pFmt + 1;
                 int env_name_len = pEnvNameEnd - pFmt - 1;
                 int ret = RequestVars::parseBuiltIn(env_name, env_name_len, 0);
@@ -3969,7 +3974,7 @@ int HttpReq::createHeaderValue(HttpSession *pSession, const char *pFmt, int len,
                         pDest += envLen;
                     }
                 }
-                pFmt = pEnvNameEnd + 2;
+                pFmt = pEnvNameEnd + 1 + hasSuffix;
             }
             break;
         case '%':

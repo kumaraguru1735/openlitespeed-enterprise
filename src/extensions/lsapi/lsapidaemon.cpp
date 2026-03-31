@@ -446,7 +446,33 @@ int LsapiDaemon::forkDaemonParent(LocalWorkerConfig *pConfig,
         _exit(1);
     }
 
+    // Issue #453: Apply configured environment variables from the
+    // external app config so that LSAPI children inherit them.
+    // System environment (from the parent process) is already inherited
+    // by the fork; configured env vars override matching system ones.
+    const Env *pCfgEnv = pConfig->getEnv();
+    if (pCfgEnv)
+    {
+        for (int i = 0; i < pCfgEnv->size(); ++i)
+        {
+            const char *entry = (*pCfgEnv)[i];
+            if (!entry)
+                continue;
+            const char *eq = strchr(entry, '=');
+            if (!eq)
+                continue;
+            int nameLen = eq - entry;
+            char name[1024];
+            if (nameLen >= (int)sizeof(name))
+                continue;
+            memcpy(name, entry, nameLen);
+            name[nameLen] = '\0';
+            setenv(name, eq + 1, 1);
+        }
+    }
+
     // Set LSAPI env vars so children know the limits
+    // (these override any configured values with the same name)
     char achBuf[64];
     snprintf(achBuf, sizeof(achBuf), "%d", m_config.m_iMaxChildren);
     setenv("LSAPI_CHILDREN", achBuf, 1);
