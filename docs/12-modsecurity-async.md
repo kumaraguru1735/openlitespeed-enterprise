@@ -19,44 +19,14 @@ before letting it through.
 
 ## How Async Mode Improves Performance
 
-### The Problem with Synchronous ModSecurity
-
 In standard (synchronous) mode, ModSecurity rule evaluation happens on the
-main event loop thread. The server processes requests one at a time through
-the WAF:
+main event loop thread. With OWASP CRS (200+ rules), each request takes 1-5ms
+for WAF evaluation, blocking the event loop from accepting new connections.
 
-```
-Request -> [Event Loop: Parse -> WAF Check -> Backend -> Response]
-                                  ^^^^^^^^
-                              Blocks event loop
-                              (1-5ms per request)
-```
-
-With a large rule set (OWASP CRS has 200+ rules), each request can take 1-5ms
-for WAF evaluation. Under high load this becomes a bottleneck -- the event
-loop cannot accept new connections while evaluating WAF rules.
-
-### How Async Mode Works
-
-This fork offloads WAF rule evaluation to a dedicated thread pool:
-
-```
-Request -> [Event Loop: Parse -> Dispatch to WAF Thread Pool]
-                                         |
-                              [WAF Thread 1: Evaluate rules]
-                              [WAF Thread 2: Evaluate rules]
-                              [WAF Thread 3: Evaluate rules]
-                                         |
-           [Event Loop: Receive result <- Allow/Block decision]
-```
-
-The event loop hands off the request body and headers to a worker thread,
-then continues accepting new connections. When the WAF thread finishes, it
-signals the event loop with the result. This means:
-
-- The event loop is never blocked by WAF processing.
-- Multiple requests can be evaluated in parallel.
-- Under high load, throughput improves dramatically.
+This fork offloads WAF evaluation to a dedicated thread pool. The event loop
+dispatches requests to worker threads and continues accepting connections.
+Multiple requests are evaluated in parallel, and throughput improves
+dramatically under load.
 
 ### Performance Comparison
 
@@ -172,27 +142,9 @@ SecAction "id:900000, phase:1, pass, t:none, \
 
 ### Recommended CRS Tuning
 
-```apacheconf
-# /etc/modsecurity/owasp-crs/crs-setup.conf
-
-# Paranoia level (start with 1)
-SecAction "id:900000, phase:1, pass, t:none, \
-    setvar:tx.paranoia_level=1"
-
-# Anomaly scoring threshold (lower = stricter)
-SecAction "id:900110, phase:1, pass, t:none, \
-    setvar:tx.inbound_anomaly_score_threshold=5, \
-    setvar:tx.outbound_anomaly_score_threshold=4"
-
-# Allowed HTTP methods
-SecAction "id:900200, phase:1, pass, t:none, \
-    setvar:'tx.allowed_methods=GET HEAD POST OPTIONS PUT DELETE'"
-
-# Allowed content types
-SecAction "id:900220, phase:1, pass, t:none, \
-    setvar:'tx.allowed_request_content_type=|application/x-www-form-urlencoded| \
-    |multipart/form-data| |text/xml| |application/xml| |application/json|'"
-```
+In `crs-setup.conf`, set the anomaly scoring thresholds (inbound=5,
+outbound=4), allowed HTTP methods, and allowed content types to match your
+application's needs.
 
 ## Custom Rules Examples
 
@@ -214,36 +166,18 @@ SecRule REQUEST_COOKIES "@rx (?i)(\'|\"|;|--|\b(or|and)\b\s+\d+\s*=\s*\d+)" \
     tag:'attack-sqli'"
 ```
 
-### Block XSS Attacks
+### Block XSS and File Upload Attacks
 
 ```apacheconf
-# Block script tags in all parameters
+# Block script tags
 SecRule ARGS "@rx (?i)<script[^>]*>.*?</script>" \
     "id:100010, phase:2, deny, status:403, \
-    log, msg:'XSS script tag detected', \
-    tag:'attack-xss'"
+    log, msg:'XSS script tag detected', tag:'attack-xss'"
 
-# Block event handler attributes
-SecRule ARGS "@rx (?i)\bon\w+\s*=\s*['\"]" \
-    "id:100011, phase:2, deny, status:403, \
-    log, msg:'XSS event handler detected', \
-    tag:'attack-xss'"
-```
-
-### Block Malicious File Uploads
-
-```apacheconf
-# Block PHP files in uploads
+# Block PHP file uploads
 SecRule FILES_NAMES "@rx \.(php|phtml|phar|php[345]|phps)$" \
     "id:100020, phase:2, deny, status:403, \
-    log, msg:'PHP file upload blocked', \
-    tag:'attack-upload'"
-
-# Block executable files
-SecRule FILES_NAMES "@rx \.(exe|bat|cmd|sh|bash|cgi|pl|py)$" \
-    "id:100021, phase:2, deny, status:403, \
-    log, msg:'Executable file upload blocked', \
-    tag:'attack-upload'"
+    log, msg:'PHP file upload blocked', tag:'attack-upload'"
 ```
 
 Include custom rules in your main config:
@@ -301,25 +235,14 @@ SecRule REQUEST_URI "@beginsWith /wp-admin/post.php" \
     ctl:ruleRemoveById=941100"
 ```
 
-### Whitelisting a Rule for a Specific Parameter
+### Disabling or Whitelisting Rules
 
 ```apacheconf
 # Allow HTML in the 'content' parameter for CMS editors
 SecRuleUpdateTargetById 941100 "!ARGS:content"
-SecRuleUpdateTargetById 941110 "!ARGS:content"
-SecRuleUpdateTargetById 941120 "!ARGS:content"
-```
 
-### Disabling a Rule Globally
-
-Only do this if you understand the security implications:
-
-```apacheconf
-# Disable a specific rule entirely
+# Disable a specific rule entirely (use with caution)
 SecRuleRemoveById 941100
-
-# Disable a range of rules
-SecRuleRemoveById 941100-941999
 ```
 
 ## Complete Production WAF Config
@@ -330,51 +253,17 @@ SecRuleRemoveById 941100-941999
 serverName                Production WAF Server
 user                      nobody
 group                     nogroup
-
 sslAsyncHandshake         1
 jitVHost                  1
-antiDdosCaptcha           1
 
 maxConnections            10000
 maxSSLConnections         10000
 
-# Async ModSecurity WAF
 module mod_security {
     modsecurity               1
     modsecurity_rules_file    /etc/modsecurity/main.conf
     modsecAsync               1
 }
-
-errorlog /usr/local/lsws/logs/error.log {
-    logLevel              WARN
-    rollingSize           10M
-}
-
-listener HTTP {
-    address               *:80
-    secure                0
-}
-
-listener HTTPS {
-    address               *:443
-    secure                1
-    keyFile               /etc/ssl/private/server.key
-    certFile              /etc/ssl/certs/server.crt
-}
-```
-
-```apacheconf
-# /etc/modsecurity/main.conf
-
-# Base ModSecurity config
-Include /etc/modsecurity/modsecurity.conf
-
-# OWASP CRS setup and rules
-Include /etc/modsecurity/owasp-crs/crs-setup.conf
-Include /etc/modsecurity/owasp-crs/rules/*.conf
-
-# Custom rules (loaded after CRS so they can override)
-Include /etc/modsecurity/custom-rules.conf
 ```
 
 After setting up, restart the server and verify:

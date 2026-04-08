@@ -786,7 +786,7 @@ int LshttpdMain::testRunningServer()
                 ++count;
                 if (count >= 10)
                 {
-                    perr("LiteSpeed Web Server is running!");
+                    perr("OpenLiteSpeed Enterprise is running!");
                     return 2;
                 }
                 ls_sleep(100);
@@ -929,7 +929,7 @@ int LshttpdMain::init(int argc, char *argv[])
     {
         //LS_ERROR("Failed to determine the root directory of server!" ));
         fprintf(stderr,
-                "Can't determine the Home of LiteSpeed Web Server, exit!\n");
+                "Can't determine the Home of OpenLiteSpeed Enterprise, exit!\n");
         return 1;
     }
 

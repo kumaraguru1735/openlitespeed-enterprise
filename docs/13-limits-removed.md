@@ -211,72 +211,41 @@ limits to match the server's capabilities.
 # Check current limit
 ulimit -n
 
-# Set for current session
-ulimit -n 65535
-
 # Set permanently in /etc/security/limits.conf
-sudo tee -a /etc/security/limits.conf > /dev/null << 'EOF'
-# OLS Enterprise limits
-nobody          soft    nofile          65535
-nobody          hard    nofile          65535
-root            soft    nofile          65535
-root            hard    nofile          65535
-*               soft    nofile          65535
-*               hard    nofile          65535
-EOF
+# Add: *  soft  nofile  65535
+# Add: *  hard  nofile  65535
 ```
 
 ### Kernel Network Tuning (sysctl)
 
-```bash
-# /etc/sysctl.d/99-ols-tuning.conf
-sudo tee /etc/sysctl.d/99-ols-tuning.conf > /dev/null << 'EOF'
-# Max file descriptors system-wide
-fs.file-max = 2097152
+Create `/etc/sysctl.d/99-ols-tuning.conf` with these key settings:
 
-# TCP connection tuning
+```
+fs.file-max = 2097152
 net.core.somaxconn = 65535
 net.core.netdev_max_backlog = 65535
 net.ipv4.tcp_max_syn_backlog = 65535
-
-# Reuse TIME_WAIT sockets
 net.ipv4.tcp_tw_reuse = 1
-
-# Reduce FIN-WAIT timeout
 net.ipv4.tcp_fin_timeout = 15
-
-# Increase port range for outbound connections
 net.ipv4.ip_local_port_range = 1024 65535
-
-# TCP buffer sizes (auto-tuned, set max)
 net.core.rmem_max = 16777216
 net.core.wmem_max = 16777216
-net.ipv4.tcp_rmem = 4096 87380 16777216
-net.ipv4.tcp_wmem = 4096 87380 16777216
-
-# Connection tracking (if using iptables)
-net.netfilter.nf_conntrack_max = 1048576
-EOF
-
-# Apply immediately
-sudo sysctl --system
 ```
+
+Apply with `sudo sysctl --system`.
 
 ### systemd Service Limits
 
-If running OLS under systemd, also set limits in the service file:
+If running OLS under systemd, create a drop-in override:
 
 ```bash
-sudo mkdir -p /etc/systemd/system/lsws.service.d/
-sudo tee /etc/systemd/system/lsws.service.d/limits.conf > /dev/null << 'EOF'
+# /etc/systemd/system/lsws.service.d/limits.conf
 [Service]
 LimitNOFILE=65535
 LimitNPROC=65535
-EOF
-
-sudo systemctl daemon-reload
-sudo systemctl restart lsws
 ```
+
+Then run `sudo systemctl daemon-reload && sudo systemctl restart lsws`.
 
 ## Complete Production Tuning Config for High-Traffic Server
 
@@ -289,27 +258,20 @@ connections across hundreds of virtual hosts:
 serverName                High-Traffic Production
 user                      nobody
 group                     nogroup
-priority                  0
 autoRestart               1
 
-# Enterprise features
 jitVHost                  1
 sslAsyncHandshake         1
 cpuAffinityMode           1
 antiDdosCaptcha           1
 
-# Connection limits (raised from stock)
 maxConnections            20000
 maxSSLConnections         20000
 connTimeout               300
 maxKeepAliveReq           50000
 keepAliveTimeout          5
-
-# Memory
 inMemBufSize              120M
-swappingDir               /tmp/lshttpd/swap
 
-# Per-client limits
 perClientConnLimit {
     softLimit             1000
     hardLimit             5000
@@ -317,52 +279,13 @@ perClientConnLimit {
     banPeriod             600
 }
 
-# Async ModSecurity WAF
 module mod_security {
     modsecurity               1
     modsecurity_rules_file    /etc/modsecurity/main.conf
     modsecAsync               1
 }
-
-# Logging
-errorlog /usr/local/lsws/logs/error.log {
-    logLevel              WARN
-    debugLevel            0
-    rollingSize           50M
-    enableStderrLog       1
-}
-
-accesslog /usr/local/lsws/logs/access.log {
-    rollingSize           50M
-    keepDays              7
-    compressArchive       1
-}
-
-# Listeners
-listener HTTP {
-    address               *:80
-    secure                0
-}
-
-listener HTTPS {
-    address               *:443
-    secure                1
-    keyFile               /etc/ssl/private/server.key
-    certFile              /etc/ssl/certs/server.crt
-    enableQuic            1
-}
 ```
 
-Pair this with the sysctl and ulimit tuning shown above for best results.
-Monitor with:
-
-```bash
-# Watch active connections
-watch -n 1 'ss -s'
-
-# Watch server memory
-watch -n 5 'ps aux | grep lshttpd | grep -v grep'
-
-# Watch error log for limit warnings
-tail -f /usr/local/lsws/logs/error.log | grep -i "limit\|exceed\|max"
-```
+Pair this with the sysctl and ulimit tuning shown above. Monitor with
+`ss -s` for connections and `tail -f /usr/local/lsws/logs/error.log` for
+limit warnings.

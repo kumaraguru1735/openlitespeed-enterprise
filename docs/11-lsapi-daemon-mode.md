@@ -19,34 +19,13 @@ starting the PHP process means 25-50% overhead on every cold request.
 
 Daemon mode changes the LSAPI process lifecycle fundamentally:
 
-### Without Daemon Mode (Default)
+**Without daemon mode**, every request forks a new `lsphp`, initializes PHP,
+processes the request, and exits. Every request pays the startup cost.
 
-```
-Request arrives -> Server forks lsphp -> PHP initializes -> Process request
-                                                         -> lsphp exits
-Request arrives -> Server forks lsphp -> PHP initializes -> Process request
-                                                         -> lsphp exits
-```
-
-Every request (or every Nth request) pays the startup cost.
-
-### With Daemon Mode
-
-```
-Server starts -> Daemon lsphp process starts (persistent parent)
-                    |
-Request arrives -> Daemon forks child -> Process request -> Child handles
-                                                            next request
-Request arrives -> Daemon forks child -> Process request -> Child handles
-                                                            next request
-                    |
-              (Daemon stays alive, children are recycled)
-```
-
-The daemon (parent) process stays running permanently. It has already loaded
-PHP, all extensions, and opcache. When a request arrives, it forks a child.
-Because fork() copies the already-initialized PHP state, the child starts
-nearly instantly (under 1ms vs 50-100ms).
+**With daemon mode**, a persistent parent `lsphp` process stays running with
+PHP already initialized. When a request arrives, it forks a child. Because
+`fork()` copies the already-initialized state, the child starts in under 1ms
+instead of 50-100ms.
 
 ## Performance Improvement
 
@@ -195,39 +174,21 @@ replaced). This prevents memory leaks from accumulating:
 
 ## Monitoring Daemon Processes
 
-### Checking Running Daemons
+### Useful Commands
 
 ```bash
 # List all lsphp daemon processes
 ps aux | grep lsphp | grep -v grep
 
-# Count daemon parent processes (one per active user in daemon mode)
-ps aux | grep lsphp | grep -v grep | grep -c "ppid=1\|lshttpd"
-
 # Show process tree (parent + children)
 pstree -p $(pgrep lshttpd | head -1) | grep lsphp
-```
 
-### Checking Logs
-
-```bash
-# Look for daemon start/stop events
-grep -i "daemon\|lsapi" /usr/local/lsws/logs/error.log | tail -20
-
-# Check for PHP crashes or timeouts
-grep -i "lsphp\|lsapi.*error\|lsapi.*timeout" /usr/local/lsws/logs/error.log
-```
-
-### Monitoring Memory Usage
-
-```bash
-# Memory used by all lsphp processes
+# Total memory used by all lsphp processes
 ps aux | grep lsphp | grep -v grep | \
     awk '{sum += $6} END {printf "Total: %.1f MB\n", sum/1024}'
 
-# Per-process memory breakdown
-ps -eo pid,user,rss,comm | grep lsphp | \
-    awk '{printf "PID: %s  User: %-12s  RSS: %.1f MB\n", $1, $2, $3/1024}'
+# Check for PHP crashes or timeouts
+grep -i "lsphp\|lsapi.*error" /usr/local/lsws/logs/error.log | tail -20
 ```
 
 ## suEXEC with Daemon Mode
@@ -251,13 +212,9 @@ extprocessor lsphp {
 }
 ```
 
-With `autoStart 2` (detached mode), the server launches `lsphp` via suEXEC.
-The daemon process runs as the vhost owner. All forked children inherit that
-UID. This gives you:
-
-- Per-user PHP process isolation.
-- Per-user resource limits via `memSoftLimit` / `memHardLimit`.
-- Per-user opcache (each user has their own warmed cache).
+With `autoStart 2`, the daemon runs as the vhost owner via suEXEC. All forked
+children inherit that UID, giving you per-user process isolation, per-user
+resource limits, and per-user opcache.
 
 ## Complete Shared Hosting PHP Config
 
@@ -336,15 +293,5 @@ If PHP requests time out:
 
 ### Daemon Not Recycling
 
-If a daemon process seems stuck:
-
-```bash
-# Find the daemon PID
-ps aux | grep lsphp | grep -v grep
-
-# Send SIGTERM to gracefully stop it (server will respawn on next request)
-kill -TERM <daemon_pid>
-
-# If unresponsive, force kill
-kill -9 <daemon_pid>
-```
+If a daemon process seems stuck, find its PID with `ps aux | grep lsphp` and
+send `kill -TERM <pid>`. The server will respawn it on the next request.

@@ -838,7 +838,7 @@ int HttpServerImpl::generateProcessReport(int fd)
     char *p = achBuf;
     p += ls_snprintf(p, &achBuf[4096] - p,
                      "VERSION: LiteSpeed Web Server/%s/%s\n",
-                     "Open",
+                     "Enterprise",
                      PACKAGE_VERSION);
     p += ls_snprintf(p, &achBuf[4096] - p, "UPTIME:");
 
