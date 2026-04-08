@@ -45,7 +45,7 @@
 #define HIGHEST_BIT_NUMBER                  0x8000
 #define BYPASS_HIGHEST_BIT_MASK             0x7FFF
 
-int  HttpRespHeaders::s_showServerHeader = 0;
+int  HttpRespHeaders::s_showServerHeader = 1;
 static char s_sConnKeepAliveHeader[57] =
     "Connection: Keep-Alive\r\nKeep-Alive: timeout=5, max=100\r\n";
 static char s_sConnCloseHeader[20] = "Connection: close\r\n";
