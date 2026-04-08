@@ -1886,8 +1886,6 @@ static char s_errUseSSL[] =
     "<p>This is an SSL protected page, please use the HTTPS scheme instead of "
     "the plain HTTP scheme to access this URL.<br />\n"
     "<blockquote>Hint: The URL should starts with <b>https</b>://</blockquote> </p>\n"
-    "<hr />\n"
-    "Powered By LiteSpeed Enterprise Web Server<br />\n"
     "</body></html>\n";
 
 static char s_redirectSSL1[] =
