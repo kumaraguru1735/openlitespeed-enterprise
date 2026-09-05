@@ -20,6 +20,8 @@ def command_requires_pkg(command):
     return command in ['default', 'list', 'set', 'set-force', 'validate']
 
 def validate_environment():
+    if os.getuid() != 0:
+        common.fatal_error("this program must be run as root")
     common.ls_cl_ok()
     
 def init_pgm():
@@ -39,6 +41,7 @@ def init_pgm():
     parser.add_argument("--tasks", type=str, help="limit number of tasks.  Specify a maximum count of tasks that can be started.")
     parser.add_argument("--size", type=str, help="set redis package size.  Default is not defined (-1).")
     parser.add_argument("--user", type=str, help="the user to request the size for.  Required for the commands usersize and userpkg")
+    parser.add_argument('--prune', action='store_true', help='with validate or validate-all, delete package files that have no users assigned')
     args = parser.parse_args()
     if not args.quiet or args.log != None:
         if args.log != None:
@@ -174,40 +177,44 @@ def read_pleskplans(plans):
     home_dict = plesk_home_dict()
     userplans = {}
     # Thanks to Stas Karpinsky of vangus.co.il for correcting the SQL!
-    plan_lines = run_program(['plesk', 'db', \
-                              "select sys_users.login, sys_users.home, " + \
-                                "Templates.name from sys_users " +  \
-                                "join hosting on sys_users.id = hosting.sys_user_id " + \
-                                "join domains on hosting.dom_id = domains.id " + \
-                                "join Subscriptions on domains.id = Subscriptions.object_id " + \
-                                "and Subscriptions.object_type = 'domain' " + \
-                                "join PlansSubscriptions on Subscriptions.id = PlansSubscriptions.subscription_id " + \
-                                "join Templates on PlansSubscriptions.plan_id = Templates.id"])
+    # Use CONCAT_WS to fold all fields into a single column separated by tabs.
+    # The previous multi-column ASCII output was ambiguous for names containing
+    # `|` or trailing whitespace; with a single column we just strip the outer
+    # `| ... |` border and split on tabs. Tabs are not valid in usernames,
+    # home paths, or (practically) Plesk plan names, so they're a safe delimiter.
+    sql = ("select CONCAT_WS('\\t', sys_users.login, sys_users.home, Templates.name) "
+           "from sys_users "
+           "join hosting on sys_users.id = hosting.sys_user_id "
+           "join domains on hosting.dom_id = domains.id "
+           "join Subscriptions on domains.id = Subscriptions.object_id "
+           "and Subscriptions.object_type = 'domain' "
+           "join PlansSubscriptions on Subscriptions.id = PlansSubscriptions.subscription_id "
+           "join Templates on PlansSubscriptions.plan_id = Templates.id")
+    plan_lines = run_program(['plesk', 'db', sql])
     for line in plan_lines.splitlines():
-        if line.startswith('+-') or line.startswith('| login'):
+        # Skip the table border lines.
+        if line.startswith('+-'):
             continue
-        pat = re.compile( r'\|\s(.*?)\s{1,}\|')
-        matches = []
-        pos = 0
-        while pos < len(line):
-            match = pat.search(line, pos)
-            if match:
-                logging.debug('Appending: %s in %s' % (match[1], line))
-                pos = match.start() + 1
-                matches.append(match[1])
-            else:
-                break
-        if len(matches) != 3:
-            for match in matches:
-                logging.debug(match)
-            common.fatal_error("Expected 3 matches in %s and got %d" % (line, len(matches)))
-        if not matches[1] in home_dict:
-            logging.debug("Missing expected home directory %s; verify it in /etc/passwd (from %s)" % (matches[1], line))
+        # Only process data rows, which start with `| ` and end with ` |`.
+        if not line.startswith('| '):
             continue
-        plan = matches[2]
-        user = home_dict[matches[1]]
+        payload = line[2:]
+        if payload.endswith(' |'):
+            payload = payload[:-2]
+        payload = payload.rstrip()
+        # Header row contains the CONCAT_WS expression itself; skip it.
+        if payload.startswith('CONCAT_WS'):
+            continue
+        fields = payload.split('\t')
+        if len(fields) != 3:
+            common.fatal_error("Expected 3 tab-separated fields in plesk db row %r" % payload)
+        login, home, plan = fields[0].strip(), fields[1].strip(), fields[2].strip()
+        if home not in home_dict:
+            logging.debug("Missing expected home directory %s; verify it in /etc/passwd (login %s)" % (home, login))
+            continue
+        user = home_dict[home]
         logging.debug("   add to %s: %s (%d)" % (plan, user.pw_name, user.pw_uid))
-        if not plan in plans:
+        if plan not in plans:
             plans[plan] = []
         plans[plan].append(user.pw_uid)
         userplans[user.pw_name] = plan
@@ -266,7 +273,11 @@ def set_users_to_pkg(opt, users, users_vals, org_pkg, pkg_json, force, args_dict
         cgval = '-1'
     else:
         cgval = pkg_json[opt]
-    args = [common.get_bin_file('lscgctl'), '--' + opt, cgval, 'set']    
+    # Defence-in-depth: cgval flows into lscgctl argv; ensure it's a plain numeric
+    # (optionally K/M/G/T-suffixed) value, not e.g. "--mem=evil" smuggled via a
+    # crafted package JSON.
+    cgval = common.validate_numeric_value(cgval)
+    args = [common.get_bin_file('lscgctl'), '--' + opt, cgval, 'set']
     found_diff = False
     for user in users:
         if not user in pkg_json['uids']:
@@ -284,7 +295,8 @@ def set_users_to_pkg(opt, users, users_vals, org_pkg, pkg_json, force, args_dict
             continue
         logging.debug('Use opt %s for user %s' % (opt, str(user)))
         found_diff = True
-        args.append(str(user))
+        # Coerce to int so a malformed package JSON can't smuggle "--cpu" as a "uid".
+        args.append(str(common.validate_uid(user)))
     if not found_diff:
         logging.debug("no diff for opt: %s" % opt)
         return False
@@ -311,7 +323,7 @@ def write_pkg(pkg, pkg_json):
     
 def revalidate_pkg(pkg, pkg_sizes, users, users_vals, org_pkg, pkg_json, force, args_dict):
     logging.debug("revalidate_pkg %s %d users" % (pkg, len(users)))
-    if len(users) == 0:
+    if len(users) == 0 and args_dict != None and args_dict.get('size') != None and int(args_dict['size']) < 0:
         logging.debug("Delete package entirely: %s" % pkg)
         filename = common.pkg_to_filename(pkg)
         if os.path.exists(filename):
@@ -343,19 +355,26 @@ def revalidate_pkg(pkg, pkg_sizes, users, users_vals, org_pkg, pkg_json, force, 
         pkg_json['uids'] = users
         write_pkg(pkg, pkg_json)
 
-def validate_pkg(pkg, pkg_sizes, users_vals, users):
+def validate_pkg(pkg, pkg_sizes, users_vals, users, prune=False):
     pkg_json = read_pkg(pkg, pkg_sizes)
-    revalidate_pkg(pkg, pkg_sizes, users, users_vals, pkg_json, pkg_json, False, None)
-    
+    # When pruning, hand revalidate_pkg a sentinel args_dict so its empty-package
+    # deletion path fires. Only do this for genuinely userless packages; a package
+    # that still has users must go through normal validation (args_dict=None) so its
+    # cgroup limits are re-applied instead of skipped.
+    args_dict = {'size': '-1'} if prune and len(users) == 0 else None
+    revalidate_pkg(pkg, pkg_sizes, users, users_vals, pkg_json, pkg_json, False, args_dict)
+
 def command_validate(args, users_vals, usersplans, pkg_sizes):
+    # Pruning applies only to the validate commands, never to list/list-all.
+    prune = args.prune and args.command in ('validate', 'validate-all')
     if args.command == 'validate-all' or args.command == 'list-all':
         for pkg in usersplans:
-            validate_pkg(pkg, pkg_sizes, users_vals, usersplans[pkg])
+            validate_pkg(pkg, pkg_sizes, users_vals, usersplans[pkg], prune)
     else:
         for pkg in args.pkg:
             if not pkg in usersplans:
                 common.fatal_error("Specified package: %s not found" % pkg)
-            validate_pkg(pkg, pkg_sizes, users_vals, usersplans[pkg])
+            validate_pkg(pkg, pkg_sizes, users_vals, usersplans[pkg], prune)
 
 def arrInfinite(opt, arr):
     return (not opt in arr) or arr[opt] == None or arr[opt] == '' or arr[opt] == '-1'

@@ -111,6 +111,8 @@ int HttpExtConnector::parseHeader(const char *&pBuf, int &len, int proxy)
 {
     int ret;
     int empty;
+    uint32_t maxDynRespHeaderLen;
+    uint32_t pendingHeaderSize = 0;
     size_t bufLen;
     const char *pWBuf ;
     empty = m_respHeaderBuf.empty();
@@ -157,20 +159,25 @@ int HttpExtConnector::parseHeader(const char *&pBuf, int &len, int proxy)
         errResponse(SC_500, NULL);
         return LS_FAIL;
     }
+    if (!(m_iRespState & 0xff))
+        pendingHeaderSize = empty ? len : m_respHeaderBuf.size();
+    maxDynRespHeaderLen =
+        HttpServerConfig::getInstance().getMaxDynRespHeaderLen();
+    if (m_iRespHeaderSize > maxDynRespHeaderLen
+        || pendingHeaderSize > maxDynRespHeaderLen - m_iRespHeaderSize)
+    {
+        LS_WARN(getLogger(), "The size of dynamic response header: %llu is"
+                " over the limit.",
+                (unsigned long long)m_iRespHeaderSize + pendingHeaderSize);
+        //abortReq(5);
+        abortReq();
+        errResponse(SC_500, NULL);
+        return LS_FAIL;
+    }
     if (m_iRespState & 0xff)
         return respHeaderDone();
     else
     {
-        if (m_iRespHeaderSize >
-            HttpServerConfig::getInstance().getMaxDynRespHeaderLen())
-        {
-            LS_WARN(getLogger(), "The size of dynamic response header: %d is"
-                    " over the limit.",  m_iRespHeaderSize);
-            //abortReq(5);
-            abortReq();
-            errResponse(SC_500, NULL);
-            return LS_FAIL;
-        }
         if (empty && len > 0)
             ret = m_respHeaderBuf.append(pBuf, len);
     }
@@ -240,10 +247,15 @@ int HttpExtConnector::flushResp()
     m_pSession->checkRespSize();
     if (m_pSession->shouldSuspendReadingResp())
     {
-        LS_DBG_M(getLogger(),
-                    "[%s] too much pending data, suspend reading response from extapp",
-                    getLogId());
-        m_pProcessor->suspendRead();
+        LS_DBG_M(getLogger(), "Exceeded resp size, try a flush\n");
+        m_pSession->flush();
+        if (m_pSession->shouldSuspendReadingResp())
+        {
+            LS_DBG_M(getLogger(),
+                        "[%s] too much pending data, suspend reading response from extapp",
+                        getLogId());
+            m_pProcessor->suspendRead();
+        }
     }
     int ret = m_pSession->flush();
     if ((ret == 0) && (!finished) && m_pProcessor)
@@ -268,10 +280,15 @@ int HttpExtConnector::processRespBodyData(const char *pBuf, int len)
         m_iRespBodyRcvd += len;
         if (m_pSession->shouldSuspendReadingResp())
         {
-            LS_DBG_M(m_pSession,
-                    "too much pending data, suspend reading response from extapp");
-            m_pProcessor->suspendRead();
-            ret = 0;
+            LS_DBG_M(m_pSession, "Exceeded resp size, try a flush 2\n");
+            m_pSession->flush();
+            if (m_pSession->shouldSuspendReadingResp())
+            {
+                LS_DBG_M(m_pSession,
+                        "too much pending data, suspend reading response from extapp");
+                m_pProcessor->suspendRead();
+                ret = 0;
+            }
         }
     }
     //        return checkRespSize();
@@ -443,6 +460,8 @@ int HttpExtConnector::process(HttpSession *pSession,
     setHttpSession(pSession);
     setAttempts(0);
     m_iRespHeaderSize = 0;
+    m_iRespContentLen = LSI_BODY_SIZE_UNKNOWN;
+
     if (pHandler->getType() == HandlerType::HT_LOADBALANCER)
     {
         LoadBalancer *pLB = (LoadBalancer *)pHandler;
@@ -623,6 +642,7 @@ int HttpExtConnector::sendReqBody()
 
 int HttpExtConnector::onRead(HttpSession *pSession)
 {
+    LS_DBG("HttpExtConnector::onRead()\n");
     if ((getState() & HEC_ERROR) || !getProcessor())
         return LS_FAIL;
     if ((getState() & (HEC_FWD_REQ_BODY | HEC_COMPLETE)) == HEC_FWD_REQ_BODY)
@@ -676,11 +696,17 @@ void HttpExtConnector::suspend()
 
 int HttpExtConnector::processCompleteRespHeader()
 {
+    const char *pBegin = m_respHeaderBuf.begin();
     const char *pEnd = m_respHeaderBuf.end();
-    while (pEnd[-1] == '\0')
+    while (pEnd > pBegin && pEnd[-1] == '\0')
         --pEnd;
+    if (pEnd == pBegin)
+    {
+        m_respHeaderBuf.clear();
+        return 0;
+    }
     int ret = HttpCgiTool::processHeaderLine(this,
-              m_respHeaderBuf.begin(), pEnd);
+              pBegin, pEnd);
     m_respHeaderBuf.clear();
     return ret;
 
@@ -757,7 +783,6 @@ void HttpExtConnector::setHttpError(int error)
 {
     errResponse(error, NULL);
 }
-
 
 
 

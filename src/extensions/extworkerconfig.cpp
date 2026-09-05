@@ -43,7 +43,7 @@ ExtWorkerConfig::ExtWorkerConfig(const char *pName)
     , m_iMaxIdleTime(INT_MAX)
     , m_iKeepAliveTimeout(INT_MAX)
     , m_iSelfManaged(1)
-    , m_iStartByServer(0)
+    , m_iStartByServer(EXTAPP_AUTOSTART_OFF)
     , m_iRefAddr(0)
     , m_iDaemonSuEXEC(0)
     , m_iDropCaps(0)
@@ -66,7 +66,7 @@ ExtWorkerConfig::ExtWorkerConfig()
     , m_iMaxIdleTime(INT_MAX)
     , m_iKeepAliveTimeout(INT_MAX)
     , m_iSelfManaged(1)
-    , m_iStartByServer(0)
+    , m_iStartByServer(EXTAPP_AUTOSTART_OFF)
     , m_iRefAddr(0)
     , m_iDaemonSuEXEC(0)
     , m_iDropCaps(0)
@@ -168,9 +168,17 @@ void ExtWorkerConfig::altServerAddr()
         {
             AutoStr2 s = m_sURL.c_str();
             char *p1 = (char *)m_pServerAddr->getUnix();
-            char *p = p1 + strlen(m_sURL.c_str()) - 5;
+            size_t pathLen = strlen(p1);
+            if (pathLen > sizeof(((struct sockaddr_un *)0)->sun_path) - 5)
+            {
+                LS_WARN("Unix socket path is too long to generate an alternate address: %s",
+                        p1);
+                return;
+            }
+            char *p = p1 + pathLen;
             int seq = rand() % 1000;
-            ls_snprintf(p, p1 + 102 - p, ".%03d", seq);
+            ls_snprintf(p, sizeof(((struct sockaddr_un *)0)->sun_path) - pathLen,
+                        ".%03d", seq);
             s.append(p, 4);
             m_sURL.setStr(s.c_str());
         }

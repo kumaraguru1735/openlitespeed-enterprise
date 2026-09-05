@@ -86,6 +86,7 @@ SetupOp     s_setupOp_all[] =
 int         s_setupOp_all_size = sizeof(s_setupOp_all);
 int         s_listenPid = 0;
 int         s_listenPidStatus = 0;
+pid_t       s_ns_watcher_pid = 0;
 
 
 SetupOp     s_SetupOp_default[] = 
@@ -289,12 +290,17 @@ static int ns_read_disabled()
         #define REALLOC_COUNT 1024
         if (!(s_disabled_uids_count % REALLOC_COUNT))
         {
-            s_disabled_uids = realloc(s_disabled_uids, sizeof(uid_t) * (s_disabled_uids_count / REALLOC_COUNT + 1) * REALLOC_COUNT);
-            if (!s_disabled_uids) {
+            uid_t *new_uids = realloc(s_disabled_uids,
+                                      sizeof(uid_t) * (s_disabled_uids_count / REALLOC_COUNT + 1) * REALLOC_COUNT);
+            if (!new_uids) {
                 ls_stderr("Insufficient memory creating namespace disabled table\n");
+                free(s_disabled_uids);
+                s_disabled_uids = NULL;
+                s_disabled_uids_count = 0;
                 fclose(fh);
                 return -1;
             }
+            s_disabled_uids = new_uids;
         }
         if (line[0] == '\n')
             continue;
@@ -333,7 +339,14 @@ int ns_init_engine(const char *ns_conf, int nolisten)
     }
     if (ns_conf)
     {
+        if (s_ns_conf)
+            free(s_ns_conf);
         s_ns_conf = strdup(ns_conf);
+        if (!s_ns_conf)
+        {
+            ls_stderr("Namespace insufficient memory storing config template\n");
+            return 0;
+        }
         DEBUG_MESSAGE("ns_init_engine, main config template LS_NS_CONF set to %s\n", ns_conf);
     }
     else 
@@ -885,13 +898,18 @@ static int create_strnums(lscgid_t *pCGI, SetupOp *op, char *work_str,
                     snprintf(str_prefix_num, sizeof(str_prefix_num), "%u", 
                              prefix_num);
                     int str_prefix_len = strlen(str_prefix_num);
-                    *strnums = realloc(*strnums, strnums_pos + str_prefix_len + 2);
-                    if (!*strnums)
                     {
-                        int err = errno;
-                        ls_stderr("Namespace can't allocate wildcard string number in %s: %s\n",
-                                  prefix, strerror(err));
-                        return nsopts_rc_from_errno(err);
+                        char *new_strnums = realloc(*strnums, strnums_pos + str_prefix_len + 2);
+                        if (!new_strnums)
+                        {
+                            int err = errno;
+                            ls_stderr("Namespace can't allocate wildcard string number in %s: %s\n",
+                                      prefix, strerror(err));
+                            free(*strnums);
+                            *strnums = NULL;
+                            return nsopts_rc_from_errno(err);
+                        }
+                        *strnums = new_strnums;
                     }
                     DEBUG_MESSAGE("create_strnums, add my id: %s\n", str_prefix_num);
                     memcpy(&(*strnums)[strnums_pos], str_prefix_num, str_prefix_len);
@@ -904,6 +922,7 @@ static int create_strnums(lscgid_t *pCGI, SetupOp *op, char *work_str,
                 }
                 ls_stderr("Namespace unexpected title in bwrap symbolic: %s\n", pos);
                 free(*strnums);
+                *strnums = NULL;
                 return DEFAULT_ERR_RC;
             case '0':
             case '1':
@@ -916,13 +935,18 @@ static int create_strnums(lscgid_t *pCGI, SetupOp *op, char *work_str,
             case '8':
             case '9':
                 len = strspn(pos, "0123456789");
-                *strnums = realloc(*strnums, strnums_pos + len + 2);
-                if (!*strnums)
                 {
-                    int err = errno;
-                    ls_stderr("Namespace can't allocate string number in %s: %s\n",
-                              prefix, strerror(err));
-                    return nsopts_rc_from_errno(err);
+                    char *new_strnums = realloc(*strnums, strnums_pos + len + 2);
+                    if (!new_strnums)
+                    {
+                        int err = errno;
+                        ls_stderr("Namespace can't allocate string number in %s: %s\n",
+                                  prefix, strerror(err));
+                        free(*strnums);
+                        *strnums = NULL;
+                        return nsopts_rc_from_errno(err);
+                    }
+                    *strnums = new_strnums;
                 }
                 DEBUG_MESSAGE("create_strnums, add specified id: %.*s\n", len,
                               pos);
@@ -944,8 +968,16 @@ static int create_strnums(lscgid_t *pCGI, SetupOp *op, char *work_str,
             default:
                 ls_stderr("Namespace unexpected character in %s\n", work_str);
                 free(*strnums);
+                *strnums = NULL;
                 return DEFAULT_ERR_RC;
         }
+    }
+    if (!*strnums || !**strnums)
+    {
+        ls_stderr("Namespace missing string numbers in %s\n", work_str);
+        free(*strnums);
+        *strnums = NULL;
+        return DEFAULT_ERR_RC;
     }
     pos = *strnums;
     while (*pos)
@@ -998,15 +1030,20 @@ static int extract_filedata(SetupOp *op, char *strnums)
                             !memcmp(strnum, comp, id_len))
                         {
                             int line_len = strlen(line);
-                            op->dest = realloc(op->dest, op_dest_len + line_len + 1);
-                            if (!op->dest)
+                            char *new_dest = realloc(op->dest, op_dest_len + line_len + 1);
+                            if (!new_dest)
                             {
                                 int err = errno;
                                 ls_stderr("Namespace unable to allocate %s buffer: %s\n",
                                           filename, strerror(err));
+                                if (op->flags & OP_FLAG_ALLOCATED_DEST)
+                                    free(op->dest);
+                                op->dest = NULL;
+                                op->flags &= ~OP_FLAG_ALLOCATED_DEST;
                                 fclose(fh);
                                 return nsopts_rc_from_errno(err);
                             }
+                            op->dest = new_dest;
                             memcpy(&op->dest[op_dest_len], line, line_len + 1);
                             op_dest_len += (line_len);
                             op->flags |= OP_FLAG_ALLOCATED_DEST;
@@ -1344,7 +1381,11 @@ static int source_create(char *path, lscgid_t *pCGI)
 {
     char part_path[1024];
     char *slash = part_path;
-    strncpy(part_path, path, sizeof(part_path) - 1);
+    if (memccpy(part_path, path, '\0', sizeof(part_path)) == NULL)
+    {
+        ls_stderr("Namespace temp dir path is too long: %s\n", path);
+        return DEFAULT_ERR_RC;
+    }
     DEBUG_MESSAGE("source_create %s\n", path);
     while ((slash = strchr(slash + 1, '/'))) 
     {
@@ -1917,11 +1958,15 @@ static int privileged_op(int privileged_op_socket, uint32_t op,
             {
                 char name[256];
                 char *slash = strrchr(arg1, '/');
-                if (slash)
-                    strncpy(name, slash + 1, sizeof(name) - 1);
-                else
-                    strncpy(name, arg1, sizeof(name) - 1);
-                    
+                const char *hostname = slash ? slash + 1 : arg1;
+                if (memccpy(name, hostname, '\0', sizeof(name)) == NULL)
+                {
+                    ls_stderr("Namespace hostname is too long: %s\n",
+                              hostname);
+                    return DEFAULT_ERR_RC;
+                }
+                name[sizeof(name) - 1] = 0;
+
                 if (sethostname(name, strlen(name)) != 0)
                 {
                     int err = errno;
@@ -2249,12 +2294,12 @@ static int setup_newroot(lscgid_t *pCGI, SetupOp *setupOp,
     SetupOp *op;
     int rc = 0;
     DEBUG_MESSAGE("setup_newroot entry!\n");
-    for (op = setupOp; op->flags != OP_FLAG_LAST; ++op)
+    for (op = setupOp; !(op->flags & OP_FLAG_LAST); ++op)
         DEBUG_MESSAGE("source: %s, dest: %s\n", op->source, op->dest);
     
     DEBUG_MESSAGE("setup_newroot\n");
     /* Do everything but the bind mounts for now.  Defer those so we can create the required dirs.  */
-    for (op = setupOp; op->flags != OP_FLAG_LAST; ++op)
+    for (op = setupOp; !(op->flags & OP_FLAG_LAST); ++op)
     {
         char *source = op->source;
         char *dest = op->dest;
@@ -2585,9 +2630,15 @@ static int setup_newroot(lscgid_t *pCGI, SetupOp *setupOp,
                                   strerror(errno));
                         rc = -1;
                     }
+                    if (!rc && !op->dest)
+                    {
+                        ls_stderr("Namespace error: no content for %s "
+                                  "(uid/gid not resolved)\n", filename);
+                        rc = -1;
+                    }
                     if (!rc && write(dest_fd, op->dest, strlen(op->dest)) <= 0)
                     {
-                        ls_stderr("Namespace error writing %s: %s\n", filename, 
+                        ls_stderr("Namespace error writing %s: %s\n", filename,
                                   strerror(errno));
                         rc = -1;
                     }
@@ -2643,7 +2694,7 @@ static int setup_newroot(lscgid_t *pCGI, SetupOp *setupOp,
     if (rc)
         return rc;
 
-    for (op = setupOp; op->flags != OP_FLAG_LAST; ++op)
+    for (op = setupOp; !(op->flags & OP_FLAG_LAST); ++op)
     {
         char *source = op->source;
         char *dest = op->dest;
@@ -2730,16 +2781,20 @@ static int resolve_symlinks_in_ops (SetupOp *setupOp)
                 op->source = realpath (old_source, NULL);
                 if (op->source == NULL)
                 {
-                    if ((op->flags & OP_FLAG_ALLOW_NOTEXIST || 
+                    if ((op->flags & OP_FLAG_ALLOW_NOTEXIST ||
                          op->flags & OP_FLAG_SOURCE_CREATE) && errno == ENOENT)
                         op->source = old_source;
                     else
                     {
                         int err = errno;
-                        DEBUG_MESSAGE("Namespace error in resolving path: %s: %s, flags: 0x%x, errno: %d\n", 
+                        DEBUG_MESSAGE("Namespace error in resolving path: %s: %s, flags: 0x%x, errno: %d\n",
                                       old_source, strerror(errno), op->flags, err);
-                        ls_stderr("Namespace error in resolving path: %s: %s, flags: 0x%x, errno: %d\n", 
+                        ls_stderr("Namespace error in resolving path: %s: %s, flags: 0x%x, errno: %d\n",
                                   old_source, strerror(errno), op->flags, err);
+                        /* Restore op->source so the caller's normal teardown
+                         * (free_setupOp -> nsopts_free_member) can free it if
+                         * OP_FLAG_ALLOCATED_SOURCE was set. */
+                        op->source = old_source;
                         return nsopts_rc_from_errno(err);
                     }
                 }
@@ -2750,7 +2805,7 @@ static int resolve_symlinks_in_ops (SetupOp *setupOp)
                     if (strcmp(old_source, op->source))
                     {
                         char linked[NOSANDBOX_MAX_FILE_LEN];
-                        ssize_t sz = readlink(old_source, linked, sizeof(linked));
+                        ssize_t sz = readlink(old_source, linked, sizeof(linked) - 1);
                         if (sz > 0)
                         {
                             linked[sz] = 0;
@@ -2891,7 +2946,7 @@ static void debug_ops(SetupOp *setupOp)
     SetupOp *op;
 
     DEBUG_MESSAGE("SetupOp =>\n");
-    for (op = setupOp; op->flags != OP_FLAG_LAST; op++) 
+    for (op = setupOp; !(op->flags & OP_FLAG_LAST); op++)
     {
         DEBUG_MESSAGE("  type: %d, source: %s, dest: %s, flags: 0x%x, fd: %d\n",
                       op->type, op->source, op->dest, op->flags, op->fd);
@@ -2906,6 +2961,7 @@ static int do_ns(lscgid_t *pCGI, SetupOp *setupOp, int persisted)
     pid_t parent_pid;
     mode_t old_umask = -1;
     char *old_cwd = NULL;
+    int host_root_fd = -1;
     
     DEBUG_MESSAGE("Entering do_ns, uid: %d, ppid: %d\n", getuid(), getppid());
     debug_ops(setupOp);
@@ -2938,6 +2994,14 @@ static int do_ns(lscgid_t *pCGI, SetupOp *setupOp, int persisted)
     
     old_cwd = get_current_dir_name ();
 
+    /* Grab an O_PATH handle to the host root BEFORE the mount namespace is
+     * modified so we can still reach host files after pivot_root.  */
+    host_root_fd = open("/", O_PATH);
+    if (host_root_fd == -1)
+    {
+        DEBUG_MESSAGE("do_ns: open(/) for host_root_fd: %s\n", strerror(errno));
+    }
+
     if (!rc)
         rc = build_mount_namespace(pCGI);
 
@@ -2947,6 +3011,14 @@ static int do_ns(lscgid_t *pCGI, SetupOp *setupOp, int persisted)
     if (!rc)
         rc = cleanup_oldroot(pCGI, persisted);
     
+    /* After the namespace is fully built, check for stale socket bind mounts
+     * and re-establish any that were replaced on the host side.  */
+    if (!rc && host_root_fd != -1)
+        nspersist_remount_stale_sockets(host_root_fd);
+
+    if (host_root_fd != -1)
+        close(host_root_fd);
+
     //if (pCGI->m_oom_score_adjust != LS_OOM_NO_ADJ)
     //    apply_oom_score_adj(pCGI->m_oom_score_adjust);
 
@@ -3206,6 +3278,27 @@ void ns_setverbose_callback(verbose_callback_t callback)
 void ns_done()
 {
     DEBUG_MESSAGE("ns_done\n");
+    if (s_ns_watcher_pid > 0)
+    {
+        kill(s_ns_watcher_pid, SIGTERM);
+        /* Bound the wait: poll for up to ~2 s, then SIGKILL and reap. */
+        int waited_ms = 0;
+        while (waited_ms < 2000)
+        {
+            pid_t r = waitpid(s_ns_watcher_pid, NULL, WNOHANG);
+            if (r == s_ns_watcher_pid || r == -1)
+                break;
+            usleep(50000); /* 50 ms */
+            waited_ms += 50;
+        }
+        if (waitpid(s_ns_watcher_pid, NULL, WNOHANG) == 0)
+        {
+            kill(s_ns_watcher_pid, SIGKILL);
+            waitpid(s_ns_watcher_pid, NULL, 0);
+        }
+        s_ns_watcher_pid = 0;
+    }
+
     nspersist_done();
     if (s_proc_fd != -1)
     {

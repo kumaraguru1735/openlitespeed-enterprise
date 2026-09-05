@@ -223,13 +223,9 @@ int ProxyConn::addForwardedFor(const char *pBegin)
         memmove(&pExtraHeader[headerLen], pForward, len);
         headerLen += len;
         pExtraHeader[headerLen++] = ',';
-        psAddr = pReq->getEnv("PROXY_REMOTE_ADDR", 17, psAddrLen);
     }
-    if (!psAddr)
-    {
-        psAddr = pSession->getPeerAddrString();
-        psAddrLen = pSession->getPeerAddrStrLen();
-    }
+    psAddr = pSession->getPeerAddrString();
+    psAddrLen = pSession->getPeerAddrStrLen();
     //add "X-Forwarded-For" header
     memmove(&pExtraHeader[headerLen], psAddr, psAddrLen);
     headerLen += psAddrLen;
@@ -390,7 +386,8 @@ int  ProxyConn::sendReqBody(const char *pBuf, int size)
         }
         LS_DBG_L(this, "send chunk encoded request body, size: %d.", size);
         ret = m_pChunkOS->write(pBuf, size);
-        m_pChunkOS->flush();
+        if (ret > 0)
+            m_pChunkOS->flush();
     }
     else if (m_iTotalPending > 0)
     {
@@ -1064,4 +1061,3 @@ void ProxyConn::continueRead()
             doRead();
     }
 }
-

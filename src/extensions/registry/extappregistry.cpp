@@ -1,6 +1,6 @@
 /*****************************************************************************
 *    Open LiteSpeed is an open source HTTP server.                           *
-*    Copyright (C) 2013 - 2022  LiteSpeed Technologies, Inc.                 *
+*    Copyright (C) 2013 - 2025  LiteSpeed Technologies, Inc.                 *
 *                                                                            *
 *    This program is free software: you can redistribute it and/or modify    *
 *    it under the terms of the GNU General Public License as published by    *
@@ -45,6 +45,9 @@
 #include <extensions/lsapi/lsapidaemon.h>
 #include <extensions/proxy/proxyconfig.h>
 #include <extensions/proxy/proxyworker.h>
+#include <lsdef.h>
+#include <extensions/scgi/scgiapp.h>
+#include <extensions/uwsgi/uwsgiapp.h>
 #include <unistd.h>
 #include "../pidlist.h"
 
@@ -226,6 +229,8 @@ static const char *s_pTypeName[] =
     "LSAPI",
     "Logger",
     "LB",
+    "SCGI",
+    "uWSGI",
 };
 
 int ExtAppSubRegistry::generateRTReport(int fd, int type)
@@ -305,6 +310,12 @@ static ExtWorker *newWorker(int type, const char *pName)
         break;
     case EA_LOADBALANCER:
         pWorker = new LoadBalancer(pName);
+        break;
+    case EA_SCGI:
+        pWorker = new ScgiApp(pName);
+        break;
+    case EA_UWSGI:
+        pWorker = new UwsgiApp(pName);
         break;
     default:
         return NULL;
@@ -470,7 +481,7 @@ int ExtAppRegistry::configVhostOwnPhp(HttpVHost *pVHost)
     char appName[256];
     const char *pUri;
     char buf[MAX_PATH_LEN];
-    int iAutoStart = 0;
+    int iAutoStart = EXTAPP_AUTOSTART_OFF;
     const char *pPath = NULL;
     ExtWorker *pWorker = NULL;
     ExtWorkerConfig *pConfig = NULL;
@@ -509,6 +520,7 @@ int ExtAppRegistry::configVhostOwnPhp(HttpVHost *pVHost)
             return -1;
         }
 
+        LS_DBG(&currentCtx, "iType: %d", iType);
         iAutoStart = ConfigCtx::getCurConfigCtx()->
                                 getLongValue(pNode, "autoStart", 0, 2, 1);
 
@@ -629,24 +641,45 @@ int ExtAppRegistry::hasUri(const char *uri)
 void ExtAppRegistry::getUniAppUri(const char *app_uri, char *dst,
                                   int dst_len, int uid, uint loop)
 {
-    int len = strlen(app_uri);
+    if (dst_len <= 0)
+        return;
 
+    char *pNul;
     if (app_uri != dst)
     {
-        memcpy(dst, app_uri, (len > dst_len) ? dst_len : len);
+        pNul = (char *)memccpy(dst, app_uri, 0, dst_len);
+        if (!pNul)
+        {
+            dst[dst_len - 1] = 0;
+            LS_ERROR("getUniAppUri error: dst_len %d smaller than uri.",
+                     dst_len);
+            return;
+        }
+        --pNul;
     }
-
-    if (len >= dst_len)
-    {
-        LS_ERROR("getUniAppUri error: dst_len %d smaller than uri len %d.",
-                 dst_len, len);
-        return ;
-    }
-
-    if (loop == 0)
-        snprintf(dst + len, dst_len - len, ".%d%u", uid, loop);
     else
-        snprintf(dst + len, dst_len - len, ".%d.%u", uid, loop);
+        pNul = (char *)memchr(dst, 0, dst_len);
+
+    if (!pNul)
+    {
+        dst[dst_len - 1] = 0;
+        LS_ERROR("getUniAppUri error: dst_len %d smaller than uri.",
+                 dst_len);
+        return;
+    }
+
+    int len = pNul - dst;
+    int n;
+    if (loop == 0)
+        n = lsnprintf(dst + len, dst_len - len, ".%d%u", uid, loop);
+    else
+        n = lsnprintf(dst + len, dst_len - len, ".%d.%u", uid, loop);
+    if (n >= dst_len - len - 1)
+    {
+        dst[len] = 0;
+        LS_ERROR("getUniAppUri error: dst_len %d too small for generated uri.",
+                 dst_len);
+    }
 }
 
 
@@ -732,7 +765,7 @@ ExtWorker *ExtAppRegistry::configExtApp(const XmlNode *pNode, const HttpVHost *p
     const char *pType;
     const char *pUri;
     char buf[MAX_PATH_LEN];
-    int iAutoStart = 0;
+    int iAutoStart = EXTAPP_AUTOSTART_OFF;
     const char *pPath = NULL;
     ExtWorker *pWorker = NULL;
     ExtWorkerConfig *pConfig = NULL;
@@ -830,10 +863,12 @@ ExtWorker *ExtAppRegistry::configExtApp(const XmlNode *pNode, const HttpVHost *p
         return NULL;
     }
 
-    if ((iType == EA_FCGI) || (iType == EA_LOGGER) || (iType == EA_LSAPI))
+    if ((iType == EA_FCGI) || (iType == EA_LOGGER) || (iType == EA_LSAPI) || (iType == EA_SCGI) || (iType == EA_UWSGI))
     {
         if (iType == EA_LOGGER)
-            iAutoStart = 1;
+            iAutoStart = EXTAPP_AUTOSTART_CGID;
+        else if (iType == EA_SCGI || iType == EA_UWSGI)
+            iAutoStart = EXTAPP_AUTOSTART_OFF;
         else
             iAutoStart = ConfigCtx::getCurConfigCtx()->getLongValue(pNode, "autoStart",
                          0, 2, 1);
@@ -1275,5 +1310,3 @@ void PidRegistry::addMarkToStop(pid_t pid, int kill_type, long lastmod)
         sendKillCmdToWatchdog(pid, kill_type, lastmod);
     }
 }
-
-

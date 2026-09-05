@@ -16,7 +16,6 @@ add_subdirectory(modules)
 add_subdirectory(quic)
 add_subdirectory(shm)
 add_subdirectory(socket)
-add_subdirectory(spdy)
 add_subdirectory(sslpp)
 add_subdirectory(ssi)
 add_subdirectory(thread)
@@ -33,9 +32,11 @@ SET(openlitespeed_SRCS
 
 
 SET(unittest_STAT_SRCS
+   ../test/unittest_helpers.cpp
    ../test/edio/bufferedostest.cpp
    ../test/edio/multiplexertest.cpp
    ../test/extensions/fcgistartertest.cpp
+   ../test/h2/unpackedheaderstest.cpp
    ../test/http/expirestest.cpp
    ../test/http/rewritetest.cpp
    ../test/http/httprequestlinetest.cpp
@@ -82,10 +83,6 @@ SET(unittest_STAT_SRCS
    ../test/util/objarraytest.cpp
    ../test/util/objpooltest.cpp
    ../test/util/radixtreetest.cpp
-   ../test/spdy/spdyzlibfiltertest.cpp
-   ../test/spdy/spdyconnectiontest.cpp
-   ../test/spdy/dummiostream.cpp
-   ../test/spdy/pushtest.cpp
    ../test/lsiapi/moduledata.cpp
    ../test/lsiapi/moduletimertest.cpp
    ../test/lsiapi/lsiapihookstest.cpp
@@ -154,12 +151,12 @@ endif()
 # So for example, if edio depends on your new directory, your directory
 # should be listed AFTER edio.  PLEASE TRY TO KEEP THIS NEAT!
 SET( litespeedlib
-    ${ASAN_LIB} cache modgzip mod_esi mod_wpprotect lsiapi main http spdy ssi http
-    registry cgi fcgi jk extensions lsapi proxy
+    ${ASAN_LIB} cache modgzip mod_esi mod_wpprotect lsiapi main http ssi http
+    registry cgi fcgi scgi uwsgi jk extensions lsapi proxy
     socket sslpp lsshm thread log4cxx adns 
     quic h2 lsquic -Wl,--whole-archive util lsr -Wl,--no-whole-archive ${MMDB_LIB}
     edio libssl.a libcrypto.a ${BSSL_ADD_LIB} ${libUnitTest}
-    libz.a libpcre.a libexpat.a libxml2.a
+    libz.a libpcre2-8.a libexpat.a libxml2.a
     ${IP2LOC_ADD_LIB} ${BROTLI_ADD_LIB} udns ${LINUX_AIO_LIB} 
     -nodefaultlibs pthread rt ${LIBSAN} ${LIBATOMIC} 
     ${CMAKE_DL_LIBS} ${STDCXX} crypt bcrypt m gcc_eh c c_nonshared gcc
@@ -167,9 +164,9 @@ SET( litespeedlib
 
 target_link_libraries(openlitespeed ${litespeedlib} )
 
-target_link_libraries(ls_shmstat lsshm log4cxx edio util lsr pthread rt )
+target_link_libraries(ls_shmstat lsshm log4cxx edio util lsr libcrypto.a pthread rt )
 
-target_link_libraries(ls_shmhashstat lsshm log4cxx edio util lsr pthread rt )
+target_link_libraries(ls_shmhashstat lsshm log4cxx edio util lsr libcrypto.a pthread rt )
 
 # target_link_libraries(ctbench ${litespeedlib} )
 
@@ -180,4 +177,3 @@ target_link_libraries(ls_shmhashstat lsshm log4cxx edio util lsr pthread rt )
 
 
 install(TARGETS openlitespeed DESTINATION bin)
-

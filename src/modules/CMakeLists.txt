@@ -46,3 +46,4 @@ if (MOD_REDISVHOST)
     add_subdirectory(redisvhost)
 endif()
 
+add_subdirectory(modacme)

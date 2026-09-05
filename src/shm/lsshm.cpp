@@ -34,6 +34,7 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/time.h>
+#include <unistd.h>
 
 
 extern "C" {
@@ -50,7 +51,7 @@ int ls_expandfile(int fd, LsShmOffset_t fromsize, LsShmXSize_t incrsize)
     errno = posix_fallocate(fd, (off_t)fromsize, incrsize);
     if (errno == 0)
         return 0;
-    if (errno != EINVAL)
+    if (errno != EINVAL && errno != EOPNOTSUPP)
         return LS_FAIL;
     LsShmOffset_t fromloc;
     int pagesize = getpagesize();
@@ -74,6 +75,20 @@ int ls_expandfile(int fd, LsShmOffset_t fromsize, LsShmXSize_t incrsize)
     }
     while (fromsize < newsize);
     return 0;
+}
+
+
+LsShmSize_t ls_shm_pagesize(void)
+{
+    static LsShmSize_t s_iSysPageSize = 0;
+    if (s_iSysPageSize == 0)
+    {
+        long size = sysconf(_SC_PAGESIZE);
+        if (size < LSSHM_PAGESIZE)
+            size = LSSHM_PAGESIZE;
+        s_iSysPageSize = (LsShmSize_t)size;
+    }
+    return s_iSysPageSize;
 }
 
 };
@@ -108,7 +123,6 @@ LsShmVersion s_version =
 {
     { LSSHM_VER_MAJOR, LSSHM_VER_MINOR, LSSHM_VER_REL, LSSHM_VER_TYPE }
 };
-LsShmSize_t LsShm::s_iPageSize = LSSHM_PAGESIZE;
 LsShmSize_t LsShm::s_iShmHdrSize = ((sizeof(LsShmMap) + 0xf) &
                                     ~0xf); // align 16
 const char *LsShm::s_pDirBase[] = {NULL, NULL, NULL, NULL, NULL};
@@ -551,8 +565,8 @@ LsShmStatus_t LsShm::openLockShmFile(int mode)
 
 LsShmStatus_t LsShm::newShmMap(LsShmSize_t size, uint64_t id)
 {
-    if (size < s_iPageSize)
-        size = s_iPageSize;
+    if (size < ls_shm_pagesize())
+        size = ls_shm_pagesize();
     if ((expandFile(0, roundToPageSize(size)) != LSSHM_OK)
         || (mapAddrMap(size) != LSSHM_OK))
         return LSSHM_ERROR;
@@ -626,7 +640,7 @@ LsShmStatus_t LsShm::initShm(const char *mapName, LsShmXSize_t size,
         return m_status;
     }
 
-    size = ((size + s_iPageSize - 1) / s_iPageSize) * s_iPageSize;
+    size = roundToPageSize(size);
 
     if (fstat(m_iFd, &mystat) < 0)
     {
@@ -704,9 +718,16 @@ LsShmStatus_t LsShm::initShm(const char *mapName, LsShmXSize_t size,
         LsShmXSize_t fileSize = ls_atomic_value(&pShmMap->x_stat.m_iFileSize);
         if (fileSize != mystat.st_size)
         {
+            if (fstat(m_iFd, &mystat) < 0)
+            {
+                setErrMsg(LSSHM_SYSERROR, "Unable to stat [%s], %s.",
+                          m_pFileName, strerror(errno));
+                return LSSHM_BADMAPFILE;
+            }
             SHM_WARN("SHM file [%s] size: %lld, does not match x_stat.m_iFileSize: %ld, correct it",
-                     m_pFileName, mystat.st_size, (long)fileSize);
-            ls_atomic_set(&pShmMap->x_stat.m_iFileSize, mystat.st_size);
+                     m_pFileName, (long long)mystat.st_size, (long)fileSize);
+            if (fileSize != (LsShmXSize_t)mystat.st_size)
+                ls_atomic_set(&pShmMap->x_stat.m_iFileSize, mystat.st_size);
             fileSize = mystat.st_size;
         }
         
@@ -1008,20 +1029,39 @@ LsShmPool *LsShm::getNamedPool(const char *name)
 
 LsShmHash *LsShm::getGlobalHash(int initSize)
 {
+    int isAutoLock;
+
     if (m_pGHash)
         return m_pGHash;
     LsShmPool *gpool = getGlobalPool();
+    if (gpool == NULL)
+        return NULL;
+
+    isAutoLock = gpool->m_iAutoLock;
+    if (isAutoLock)
+    {
+        gpool->m_iAutoLock = 0;
+        gpool->lock();
+    }
+
     if (!x_pShmMap->x_globalHashOff)
     {
         x_pShmMap->x_globalHashOff = gpool->allocateNewHash(initSize, 1,
                                                             LSSHM_FLAG_NONE);
         if (!x_pShmMap->x_globalHashOff)
-            return NULL;
+            m_pGHash = NULL;
     }
-    m_pGHash = gpool->newHashByOffset(x_pShmMap->x_globalHashOff, "_G",
-            LsShmHash::hashXXH32, memcmp, LSSHM_FLAG_NONE);
-    return m_pGHash;
+    if ((!m_pGHash) && x_pShmMap->x_globalHashOff)
+        m_pGHash = gpool->newHashByOffset(x_pShmMap->x_globalHashOff, "_G",
+                                          LsShmHash::hashXXH32, memcmp,
+                                          LSSHM_FLAG_NONE);
 
+    if (isAutoLock)
+    {
+        gpool->unlock();
+        gpool->m_iAutoLock = 1;
+    }
+    return m_pGHash;
 }
 
 

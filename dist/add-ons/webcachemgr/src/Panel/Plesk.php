@@ -4,7 +4,7 @@
  * LiteSpeed Web Server Cache Manager
  *
  * @author LiteSpeed Technologies, Inc. (https://www.litespeedtech.com)
- * @copyright (c) 2018-2023
+ * @copyright (c) 2018-2026
  * ******************************************* */
 
 namespace Lsc\Wp\Panel;
@@ -400,27 +400,24 @@ class Plesk extends ControlPanel
      * version among them.
      *
      * @since 1.9.6
+     * @since 1.17.6  Added PHP versions 8.3 & 8.4.
      *
      * @return string
      */
     protected function getDefaultPhpBinary()
     {
-        $binaryList = array (
-            '/opt/plesk/php/8.2/bin/php',
-            '/opt/plesk/php/8.1/bin/php',
-            '/opt/plesk/php/8.0/bin/php',
-            '/opt/plesk/php/7.4/bin/php',
-            '/opt/plesk/php/7.3/bin/php',
-            '/opt/plesk/php/7.2/bin/php',
-            '/opt/plesk/php/7.1/bin/php',
-            '/opt/plesk/php/7.0/bin/php',
-            '/opt/plesk/php/5.6/bin/php',
-        );
+        foreach (
+                [
+                    '8.4', '8.3', '8.2', '8.1', '8.0',
+                    '7.4', '7.3', '7.2', '7.1', '7.0',
+                    '5.6'
+                ]
+                as
+                $phpVer
+        ) {
 
-        foreach ( $binaryList as $binary ) {
-
-            if ( file_exists($binary)) {
-                return $binary;
+            if ( file_exists(($bin = "/opt/plesk/php/$phpVer/bin/php")) ) {
+                return $bin;
             }
         }
 
@@ -429,12 +426,15 @@ class Plesk extends ControlPanel
 
     /**
      *
+     * @since 1.17.10
+     *
      * @param WPInstall $wpInstall
      *
-     * @return string
+     * @return PhpBinaryParts
      */
-    public function getPhpBinary( WPInstall $wpInstall )
+    public function getPhpBinaryParts( WPInstall $wpInstall )
     {
+        $binPath    = '';
         $serverName = $wpInstall->getData(WPInstall::FLD_SERVERNAME);
 
         if ( $serverName != null ) {
@@ -448,22 +448,49 @@ class Plesk extends ControlPanel
                     . '| sed -n \'s:.*<clipath>\(.*\)</clipath>.*:\1:p\''
             );
 
-            if ( $output ) {
-                $binPath = trim($output);
+            if ( $output !== null ) {
+                $candidate = trim($output);
+
+                if ( $candidate !== ''
+                        && preg_match('#^/[A-Za-z0-9_./\-]+$#', $candidate)
+                        && is_file($candidate)
+                        && is_executable($candidate) ) {
+
+                    $binPath = $candidate;
+                }
+                elseif ( $candidate !== '' ) {
+                    Logger::debug(
+                        'Plesk handler <clipath> rejected as unsafe or '
+                            . "non-executable: $candidate. Falling back "
+                            . 'to default PHP binary.'
+                    );
+                }
             }
         }
 
-        if ( !empty($binPath) ) {
-            $phpBin = $binPath;
-        }
-        elseif ( ($defaultBinary = $this->getDefaultPHPBinary()) != '' ) {
-            $phpBin = $defaultBinary;
-        }
-        else {
-            $phpBin = 'php';
+        if ( $binPath === '' ) {
+            $defaultBinary = $this->getDefaultPhpBinary();
+            $binPath       = $defaultBinary !== '' ? $defaultBinary : 'php';
         }
 
-        return "$phpBin $this->phpOptions";
+        return new PhpBinaryParts($binPath, $this->phpOptions);
+    }
+
+    /**
+     * @deprecated since 1.17.10  Override getPhpBinaryParts() instead.
+     *
+     * @param WPInstall $wpInstall
+     *
+     * @return string
+     */
+    public function getPhpBinary( WPInstall $wpInstall )
+    {
+        $parts   = $this->getPhpBinaryParts($wpInstall);
+        $options = $parts->getOptionsString();
+
+        return $options === ''
+            ? $parts->getBinPath()
+            : $parts->getBinPath() . ' ' . $options;
     }
 
 }

@@ -87,7 +87,6 @@ typedef ls_mutex_t              ls_shmlock_t;
 #define ls_shmlock_locked       ls_mutex_ipc_locked
 #endif
 
-
 // shared memory types
 typedef uint32_t                LsShmOffset_t;
 typedef LsShmOffset_t           LsShmXSize_t;
@@ -109,9 +108,16 @@ typedef v2_comp                 LsShmValComp_fn;
 #define LSSHM_VER_TYPE          \
     (((sizeof(LsShmOffset_t)<<4) | sizeof(LsShmXSize_t)) & (0xff)) // 8 bits
 
-#define LSSHM_PAGESIZE          0x2000  // min pagesize 8k
-#define LSSHM_PAGEMASK          0xFFFFE000
+#define LSSHM_PAGESIZE          0x4000  // lower bound only, see ls_shm_pagesize()
 #define LSSHM_MAXNAMELEN        12      // only 11 characters.
+
+/* SHM file offsets end up as the mmap() offset argument, which the kernel
+ * requires to be a multiple of the running system's page size (16K on Apple
+ * Silicon and 16K-page ARM64 kernels, possibly larger on others).  Returns
+ * the larger of sysconf(_SC_PAGESIZE) and LSSHM_PAGESIZE, so the growth
+ * granularity never drops below the historical value either.
+ */
+LsShmSize_t ls_shm_pagesize(void);
 
 #define LSSHM_SYSSHM            "LsShm"     // default SHM name
 #define LSSHM_SYSPOOL           "LsPool"    // default SHM POOL name
@@ -196,4 +202,3 @@ typedef struct ls_shmhiteroff_s
 
 
 #endif
-

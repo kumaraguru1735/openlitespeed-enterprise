@@ -224,7 +224,7 @@ void HttpContext::releaseHTAConf()
 int HttpContext::set(const char *pURI, const char *pLocation,
                      const HttpHandler *pHandler, bool browse, int regex)
 {
-    if (pURI == NULL)
+    if (pURI == NULL || *pURI == '\0')
         return EINVAL;
     if (strncasecmp(pURI, "exp:", 4) == 0)
     {
@@ -1086,6 +1086,8 @@ const MimeSetting *HttpContext::determineMime(const char *pSuffix,
 
 void HttpContext::setRewriteBase(const char *p)
 {
+    if (!p || !*p)
+        return;
     int len = strlen(p);
     int slash = 0;
     if (p[len - 1] != '/')
@@ -1780,4 +1782,3 @@ int HttpContext::config(const RewriteMapList *pMapList,
 
     return 0;
 }
-

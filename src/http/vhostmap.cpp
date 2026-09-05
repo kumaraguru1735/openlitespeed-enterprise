@@ -21,6 +21,7 @@
 #include <http/httpvhost.h>
 #include <http/httpvhostlist.h>
 #include <http/jitconfigloader.h>
+#include <http/useacme.h>
 #include <log4cxx/logger.h>
 #include <lsr/ls_strtool.h>
 #include <main/zconfmanager.h>
@@ -85,7 +86,7 @@ VHostMap::VHostMap()
 
 VHostMap::~VHostMap()
 {
-
+    LS_DBG("VHostMap SSL: %p\n", m_pSslContext);
     if (m_pSslContext)
         delete m_pSslContext;
     clear();
@@ -523,11 +524,20 @@ HttpVHost *VHostMap::exactMatchVHost(const char *pHost) const
 
 void VHostMap::setSslContext(SslContext *pContext)
 {
+    LS_DBG("VHostMap setSslContext: %p\n", pContext);
+
     if (pContext == m_pSslContext)
         return;
     if (m_pSslContext)
         delete m_pSslContext;
     m_pSslContext = pContext;
+    if (m_pSslContext->initSNI(this) == -1)
+    {
+        LS_WARN("TLS extension is not available in openssl library on this server, "
+                "server name indication is disabled, you will not able to use use per vhost"
+                " SSL certificates sharing one IP. Please upgrade your OpenSSL lib if you want to use this feature."
+                );
+    }
 }
 
 
@@ -940,5 +950,7 @@ HttpVHost *VHostMap::jitLoadVHost(const char *pHost)
 
 void SubIpMap::setDefaultSslCtx(SslContext *pContext)
 {
+    LS_DBG("setDefaultSslCtx: %p\n", pContext);
+
     m_pSslContext = pContext;
 }

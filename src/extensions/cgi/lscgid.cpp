@@ -22,6 +22,7 @@
 #endif
 
 #include "lscgid.h"
+#include "nspersist.h"
 
 #include <lsdef.h>
 #include <util/fdpass.h>
@@ -53,6 +54,24 @@
 #include "use_bwrap.h"
 #include <sys/prctl.h>
 #include <linux/capability.h>
+#else
+/* ns.h, nsopts.h and the body of nspersist.h are all Linux-only, but the
+ * namespace call sites below are not individually guarded. Off Linux
+ * s_ns_enabled is never set, so those paths are inert; supply the handful of
+ * names they reference so the file still compiles. The two stubs that are
+ * reached unconditionally must keep the non-namespace behavior: forking a
+ * child does nothing extra, and no reaped pid is ever the socket watcher. */
+#define LS_NS_LEN         5
+#define DEBUG_MESSAGE(...)
+
+static inline void nspersist_socket_watcher_forked_child(void)
+{   }
+
+static inline pid_t nspersist_start_socket_watcher(void)
+{   return -1;   }
+
+static inline int nspersist_socket_watcher_reaped(pid_t pid)
+{   (void)pid;  return 0;   }
 #endif
 
 void ls_stderr(const char * fmt, ...)
@@ -176,6 +195,15 @@ static char         s_sDataBuf[16384];
 static int          s_fdControl = -1;
 static int          s_ns_enabled = 0;
 
+#define NS_WATCHER_RESTART_DELAY_INITIAL 5
+#define NS_WATCHER_RESTART_DELAY_MAX     300
+#define NS_WATCHER_RESTART_STABLE        60
+
+static int          s_ns_watcher_restart_delay =
+    NS_WATCHER_RESTART_DELAY_INITIAL;
+static time_t       s_ns_watcher_next_restart = 0;
+static time_t       s_ns_watcher_last_start = 0;
+static int          s_ns_watcher_disabled = 0;
 
 static void log_cgi_error(const char *func, const char *arg,
                                                     const char *explanation)
@@ -476,8 +504,6 @@ static int cgroup_v2(int uid, int pid)
                 if (fclose(fp) < 0)
                     ls_stderr("Cgroups Error closing %s: %s", user_slice,
                               strerror(errno));
-                ls_stderr("Cgroups returning success file: %s, pid: %d\n",
-                          user_slice, pid);
 
                 char systemd_start[128];
                 snprintf(systemd_start, sizeof(systemd_start), "/bin/systemctl start user-%d.slice", uid);
@@ -620,9 +646,6 @@ static int execute_cgi(lscgid_t *pCGI)
 
     if (setpriority(PRIO_PROCESS, 0, pCGI->m_data.m_priority))
         perror("lscgid: setpriority()");
-
-    if (pCGI->m_stderrPath)
-        fixStderrLogPermission(pCGI);
 
 #ifdef HAS_CLOUD_LINUX
 
@@ -1008,7 +1031,10 @@ static int new_conn(int fd)
     pid_t pid;
     pid = fork();
     if (!pid)
+    {
+        nspersist_socket_watcher_forked_child();
         child_main(fd);
+    }
     close(fd);
     if (pid > 0)
         pid = 0;
@@ -1021,6 +1047,96 @@ static int s_got_sigchild = 0;
 
 
 static void processSigchild();
+static int start_socket_watcher();
+static void schedule_socket_watcher_restart(int reset_if_stable,
+                                            int immediate_allowed);
+static void schedule_socket_watcher_after_reap(int status);
+
+
+static int start_socket_watcher()
+{
+    if (!s_ns_enabled || s_ns_watcher_disabled)
+        return 0;
+
+    pid_t pid = nspersist_start_socket_watcher();
+    if (pid > 0)
+    {
+        s_ns_watcher_last_start = time(NULL);
+        s_ns_watcher_next_restart = 0;
+        DEBUG_MESSAGE("socket watcher running as pid %d\n", (int)pid);
+        return 0;
+    }
+
+    if (pid == 0)
+    {
+        s_ns_watcher_disabled = 1;
+        s_ns_watcher_next_restart = 0;
+        DEBUG_MESSAGE("socket watcher disabled; unsupported by this host\n");
+        return 0;
+    }
+
+    schedule_socket_watcher_restart(0, 0);
+    return -1;
+}
+
+
+static void schedule_socket_watcher_restart(int reset_if_stable,
+                                            int immediate_allowed)
+{
+    if (!s_ns_enabled || s_ns_watcher_disabled || !s_run)
+        return;
+
+    time_t now = time(NULL);
+    if (reset_if_stable && s_ns_watcher_last_start &&
+        now - s_ns_watcher_last_start >= NS_WATCHER_RESTART_STABLE)
+    {
+        s_ns_watcher_restart_delay = NS_WATCHER_RESTART_DELAY_INITIAL;
+    }
+
+    int delay = s_ns_watcher_restart_delay;
+    if (immediate_allowed &&
+        s_ns_watcher_restart_delay == NS_WATCHER_RESTART_DELAY_INITIAL)
+    {
+        delay = 0;
+    }
+
+    s_ns_watcher_next_restart = now + delay;
+    DEBUG_MESSAGE("socket watcher restart scheduled in %d seconds "
+                  "(next backoff %d seconds)\n", delay,
+                  s_ns_watcher_restart_delay);
+
+    if (s_ns_watcher_restart_delay < NS_WATCHER_RESTART_DELAY_MAX)
+    {
+        s_ns_watcher_restart_delay *= 2;
+        if (s_ns_watcher_restart_delay > NS_WATCHER_RESTART_DELAY_MAX)
+            s_ns_watcher_restart_delay = NS_WATCHER_RESTART_DELAY_MAX;
+    }
+}
+
+
+static void schedule_socket_watcher_after_reap(int status)
+{
+    int reset_if_stable = 1;
+    int immediate_allowed = 0;
+
+    if (WIFSIGNALED(status))
+    {
+        int sig_num = WTERMSIG(status);
+        DEBUG_MESSAGE("socket watcher killed by signal %d\n", sig_num);
+        immediate_allowed = 1;
+    }
+    else if (WIFEXITED(status))
+    {
+        DEBUG_MESSAGE("socket watcher exited with status %d\n",
+                      WEXITSTATUS(status));
+    }
+    else
+    {
+        DEBUG_MESSAGE("socket watcher exited with status 0x%x\n", status);
+    }
+
+    schedule_socket_watcher_restart(reset_if_stable, immediate_allowed);
+}
 
 
 static int run(int fdServerSock)
@@ -1047,6 +1163,8 @@ static int run(int fdServerSock)
         }
         if (s_got_sigchild)
             processSigchild();
+        if (s_ns_watcher_next_restart && time(NULL) >= s_ns_watcher_next_restart)
+            start_socket_watcher();
     }
     return 0;
 }
@@ -1084,6 +1202,11 @@ static void processSigchild()
             //if ((pid < 1)&&( errno == EINTR ))
             //    continue;
             break;
+        }
+        if (nspersist_socket_watcher_reaped(status[0]))
+        {
+            schedule_socket_watcher_after_reap(status[1]);
+            continue;
         }
         if (s_fdControl != -1)
             write(s_fdControl, status, sizeof(status));
@@ -1172,6 +1295,16 @@ int lscgid_main(int fd, char *argv0, const char *secret, char *pSock)
 
     }
     s_ns_enabled = HttpServerConfig::getInstance().getNS();
+    if (s_ns_enabled)
+    {
+        DEBUG_MESSAGE("Namespace container is enabled.\n");
+        /* Start the host-side socket watcher that monitors MySQL
+         * (and other) socket bounces and remounts stale bind mounts
+         * inside persisted namespaces.  */
+        start_socket_watcher();
+    }
+    else
+        DEBUG_MESSAGE("Namespace container is NOT enabled\n");
 #endif
 
 #endif
@@ -1197,5 +1330,3 @@ int lscgid_main(int fd, char *argv0, const char *secret, char *pSock)
     }
     return ret;
 }
-
-

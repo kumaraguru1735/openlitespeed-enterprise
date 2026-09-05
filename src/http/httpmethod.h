@@ -24,6 +24,8 @@ typedef int http_method_t;
 class HttpMethod
 {
 public:
+    static const int MAX_METHOD_LEN = 16;
+
     enum
     {
         HTTP_UNKNOWN = 0,
@@ -56,6 +58,7 @@ public:
         DAV_MKACTIVITY,
         DAV_BIND,
         DAV_SEARCH,
+        HTTP_MKCALENDAR,
         HTTP_PURGE,
         HTTP_REFRESH,
         HTTP_METHOD_END

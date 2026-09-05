@@ -132,8 +132,8 @@ public:
 
     const char *getTlsExtHostName();
 
-    int getSpdyVersion();
-    int getAlpnResult()     {   return getSpdyVersion();    }
+    int getSpdyVersion() const      {   return getAlpnResult();     }
+    int getAlpnResult() const;
 
     int updateOnGotCert();
     

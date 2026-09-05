@@ -3,14 +3,18 @@
  * LITE SPEED PROPRIETARY/CONFIDENTIAL.
  */
 
+#if defined(linux) || defined(__linux) || defined(__linux__) || defined(__gnu_linux__)
+
 #define _GNU_SOURCE
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
+#include <limits.h>
 #include <pwd.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,6 +59,8 @@ char *s_bwrap_var[] = {
     BWRAP_VAR_UID,
     BWRAP_VAR_USER
 };
+
+#define NOSANDBOX_MAX_BLOB_LEN (8 * 1024 * 1024)
 
 static int readall(int fd, char *pBuf, int len, int EOFOk)
 {
@@ -113,87 +119,170 @@ static int compareStrings(const void *a, const void *b)
     return strcmp(str1, str2);
 }
 
-static int validate(sandbox_init_req_t *req, char *argv, char ***argva, char *env, char ***enva)
+
+static int validate_init_req(const sandbox_init_req_t *req)
 {
-    int pos = 0;
-    DEBUG_MESSAGE("My pid: %d, my ppid: %d, recv pid: %d, recv ppid: %d, argc: %d, argv_len: %d, env_len: %d, nenv: %d\n",
-                  getpid(), getppid(), req->m_pid, req->m_ppid, req->m_argc, req->m_argv_len, req->m_env_len, req->m_nenv);
-    if (req->m_argc <= 0)
+    if (req->m_argc <= 0 || req->m_nenv < 0 ||
+        req->m_argv_len < req->m_argc || req->m_env_len < req->m_nenv)
     {
-        DEBUG_MESSAGE("Sandbox program invalid number of parameters %d\n", req->m_argc);
-        ls_stderr("Child process invalid number of parameters %d\n", req->m_argc);
+        ls_stderr("Child process invalid request counts: argc=%d nenv=%d "
+                  "argv_len=%d env_len=%d\n", req->m_argc, req->m_nenv,
+                  req->m_argv_len, req->m_env_len);
         return -1;
     }
-    argv[req->m_argv_len] = 0;
-    DEBUG_MESSAGE("For bsearch, argv: %s\n", argv);
+    if (req->m_argv_len > NOSANDBOX_MAX_BLOB_LEN ||
+        req->m_env_len > NOSANDBOX_MAX_BLOB_LEN)
+    {
+        ls_stderr("Child process request data is too large: argv_len=%d "
+                  "env_len=%d\n", req->m_argv_len, req->m_env_len);
+        return -1;
+    }
+    if ((size_t)req->m_argc + 1 > SIZE_MAX / sizeof(char *) ||
+        (size_t)req->m_nenv + 1 > SIZE_MAX / sizeof(char *))
+    {
+        ls_stderr("Child process request pointer table is too large\n");
+        return -1;
+    }
+    return 0;
+}
+
+
+static int split_blob(const char *label, char *blob, int blob_len, int count,
+                      char ***out)
+{
+    int pos = 0;
+    char **values = malloc(sizeof(char *) * ((size_t)count + 1));
+    if (!values)
+    {
+        ls_stderr("Sandbox program memory shortage building %s\n", label);
+        return -1;
+    }
+    for (int i = 0; i < count; i++)
+    {
+        if (pos >= blob_len)
+        {
+            ls_stderr("Sandbox %s ended before entry #%d of %d\n", label, i,
+                      count);
+            free(values);
+            return -1;
+        }
+        size_t remaining = (size_t)(blob_len - pos);
+        size_t len = strnlen(&blob[pos], remaining);
+        if (len == remaining)
+        {
+            ls_stderr("Sandbox %s entry #%d is not terminated within %d bytes\n",
+                      label, i, blob_len);
+            free(values);
+            return -1;
+        }
+        values[i] = &blob[pos];
+        DEBUG_MESSAGE(" %s[%d]: %s\n", label, i, values[i]);
+        pos += (int)len + 1;
+    }
+    if (pos != blob_len)
+    {
+        ls_stderr("Sandbox %s has %d trailing bytes after %d entries\n", label,
+                  blob_len - pos, count);
+        free(values);
+        return -1;
+    }
+    values[count] = NULL;
+    *out = values;
+    return 0;
+}
+
+
+/* Environment variable name prefixes/exact names that must be stripped before
+ * exec()ing a hostexec program.  These influence the dynamic linker or shell
+ * startup and could be abused for privilege escalation if a client can choose
+ * the UID we run as.  Even with peer-credential authentication we strip these
+ * defensively so that a compromised tenant cannot tamper with another tenant's
+ * runtime via LD_PRELOAD/LD_AUDIT/etc. when a misconfiguration allows it. */
+static int env_is_dangerous(const char *e)
+{
+    /* Anything starting with LD_ is a dynamic-linker control variable. */
+    if (strncmp(e, "LD_", 3) == 0)
+        return 1;
+    /* GLIBC tunables can disable security checks. */
+    if (strncmp(e, "GLIBC_TUNABLES=", 15) == 0)
+        return 1;
+    /* Shell startup hooks. */
+    if (strncmp(e, "BASH_ENV=", 9) == 0 ||
+        strncmp(e, "ENV=", 4) == 0 ||
+        strncmp(e, "IFS=", 4) == 0 ||
+        strncmp(e, "PS4=", 4) == 0 ||
+        strncmp(e, "SHELLOPTS=", 10) == 0 ||
+        strncmp(e, "BASHOPTS=", 9) == 0)
+        return 1;
+    /* Language runtime startup hooks. */
+    if (strncmp(e, "PERL5OPT=", 9) == 0 ||
+        strncmp(e, "PERL5LIB=", 9) == 0 ||
+        strncmp(e, "PERLLIB=", 8) == 0 ||
+        strncmp(e, "PYTHONPATH=", 11) == 0 ||
+        strncmp(e, "PYTHONSTARTUP=", 14) == 0 ||
+        strncmp(e, "PYTHONHOME=", 11) == 0 ||
+        strncmp(e, "PYTHONINSPECT=", 14) == 0 ||
+        strncmp(e, "NODE_OPTIONS=", 13) == 0 ||
+        strncmp(e, "NODE_PATH=", 10) == 0 ||
+        strncmp(e, "RUBYOPT=", 8) == 0 ||
+        strncmp(e, "RUBYLIB=", 8) == 0)
+        return 1;
+    return 0;
+}
+
+
+/* Remove dangerous entries from a NULL-terminated env array in place. */
+static void sanitize_env(char **env)
+{
+    int r = 0, w = 0;
+    while (env[r])
+    {
+        if (env_is_dangerous(env[r]))
+        {
+            DEBUG_MESSAGE("Stripping dangerous env entry: %s\n", env[r]);
+            r++;
+            continue;
+        }
+        if (w != r)
+            env[w] = env[r];
+        r++;
+        w++;
+    }
+    env[w] = NULL;
+}
+
+static int validate(sandbox_init_req_t *req, char *argv, char ***argva, char *env, char ***enva)
+{
+    DEBUG_MESSAGE("My pid: %d, my ppid: %d, recv pid: %d, recv ppid: %d, argc: %d, argv_len: %d, env_len: %d, nenv: %d\n",
+                  getpid(), getppid(), req->m_pid, req->m_ppid, req->m_argc, req->m_argv_len, req->m_env_len, req->m_nenv);
+    *argva = NULL;
+    *enva = NULL;
+    if (split_blob("argv", argv, req->m_argv_len, req->m_argc, argva))
+        return -1;
+    DEBUG_MESSAGE("For bsearch, argv: %s\n", (*argva)[0]);
     for (int i = 0; i < s_nosandbox_count; i++)
     {
         DEBUG_MESSAGE("s_sandbox_arr[%d]: %s\n", i, s_nosandbox_arr[i]);
     }
-    if (!bsearch(&argv, s_nosandbox_arr, s_nosandbox_count, sizeof(char *), compareStrings))
+    char *program = (*argva)[0];
+    if (!bsearch(&program, s_nosandbox_arr, s_nosandbox_count, sizeof(char *), compareStrings))
     {
-        DEBUG_MESSAGE("Sandbox program not in list: %s, breaking connection\n", argv);
-        ls_stderr("Sandbox program not in list: %s, breaking connection\n", argv);
+        DEBUG_MESSAGE("Sandbox program not in list: %s, breaking connection\n", program);
+        ls_stderr("Sandbox program not in list: %s, breaking connection\n", program);
         return -1;
     }
-    DEBUG_MESSAGE("bsearch, found: %s\n", argv);
-    if (access(argv, X_OK) != 0)
+    DEBUG_MESSAGE("bsearch, found: %s\n", program);
+    if (access(program, X_OK) != 0)
     {
         int err = errno;
-        DEBUG_MESSAGE("Sandbox program %s has issues: %s\n", argv, strerror(err));
-        ls_stderr("Sandbox program %s has issues: %s\n", argv, strerror(err));
-        return -1;
-    }
-    *argva = malloc(sizeof(char *) * (req->m_argc + 1));
-    if (!*argva)
-    {
-        DEBUG_MESSAGE("Sandbox program memory shortage argca\n");
-        ls_stderr("Sandbox program memory shortage argca\n");
-        return -1;
-    }
-    DEBUG_MESSAGE("Build argva\n")
-    for (int i = 0; i < req->m_argc; i++)
-    {
-        int len = strlen(&argv[pos]);
-        if (len + pos > req->m_argv_len)
-        {
-            DEBUG_MESSAGE("Sandbox process unexpected overrun in argv #%d of %d, pos: %d, len: %d, full len: %d\n",
-                          i, req->m_argc, pos, len, req->m_argv_len);
-            ls_stderr("Sandbox process unexpected overrun in argv #%d of %d, pos: %d, len: %d, full len: %d\n",
-                      i, req->m_argc, pos, len, req->m_argv_len);
-            return -1;
-        }
-        (*argva)[i] = &argv[pos];
-        DEBUG_MESSAGE(" argv[%d]: %s\n", i, &argv[pos])
-        pos += (len + 1);
-    }
-    (*argva)[req->m_argc] = NULL;
-    env[req->m_env_len] = 0;
-    *enva = malloc(sizeof(char *) * (req->m_nenv + 1));
-    if (!*enva)
-    {
-        DEBUG_MESSAGE("Sandbox program memory shortage enva\n");
-        ls_stderr("Sandbox program memory shortage enva\n");
+        DEBUG_MESSAGE("Sandbox program %s has issues: %s\n", program, strerror(err));
+        ls_stderr("Sandbox program %s has issues: %s\n", program, strerror(err));
         return -1;
     }
     DEBUG_MESSAGE("Build enva\n")
-    pos = 0;
-    for (int i = 0; i < req->m_nenv; i++)
-    {
-        int len = strlen(&env[pos]);
-        if (len + pos > req->m_env_len)
-        {
-            ls_stderr("Sandbox unexpected overrun in enva #%d of %d, pos: %d, len: %d, full len: %d\n",
-                      i, req->m_nenv, pos, len, req->m_env_len);
-            DEBUG_MESSAGE("Sandbox unexpected overrun in enva #%d of %d, pos: %d, len: %d, full len: %d\n",
-                          i, req->m_nenv, pos, len, req->m_env_len);
-            return -1;
-        }
-        (*enva)[i] = &env[pos];
-        DEBUG_MESSAGE(" env[%d]: %s\n", i, &env[pos])
-        pos += (len + 1);
-    }
-    (*enva)[req->m_nenv] = NULL;
+    if (split_blob("env", env, req->m_env_len, req->m_nenv, enva))
+        return -1;
+    sanitize_env(*enva);
     DEBUG_MESSAGE("validate ok\n")
     return 0;
 }
@@ -263,12 +352,36 @@ int apply_rlimits_uid(sandbox_init_req_t *req)
 }
 
 
-static int run_pgm(int fd, sandbox_init_req_t *req, int fdin[], int fdout[], 
+static int run_pgm(int fd, sandbox_init_req_t *req, int fdin[], int fdout[],
                    int fderr[], char *argv[], char *env[], pid_t *pid)
 {
-    pipe(fdin);
-    pipe(fdout);
-    pipe(fderr);
+    fdin[0] = fdin[1] = fdout[0] = fdout[1] = fderr[0] = fderr[1] = -1;
+    if (pipe(fdin))
+    {
+        int err = errno;
+        DEBUG_MESSAGE("Error creating stdin pipe: %s\n", strerror(err));
+        ls_stderr("Error creating stdin pipe: %s\n", strerror(err));
+        return -1;
+    }
+    if (pipe(fdout))
+    {
+        int err = errno;
+        DEBUG_MESSAGE("Error creating stdout pipe: %s\n", strerror(err));
+        ls_stderr("Error creating stdout pipe: %s\n", strerror(err));
+        close(fdin[0]); close(fdin[1]);
+        fdin[0] = fdin[1] = -1;
+        return -1;
+    }
+    if (pipe(fderr))
+    {
+        int err = errno;
+        DEBUG_MESSAGE("Error creating stderr pipe: %s\n", strerror(err));
+        ls_stderr("Error creating stderr pipe: %s\n", strerror(err));
+        close(fdin[0]); close(fdin[1]);
+        close(fdout[0]); close(fdout[1]);
+        fdin[0] = fdin[1] = fdout[0] = fdout[1] = -1;
+        return -1;
+    }
     *pid = fork();
     if (*pid == 0)
     {
@@ -290,6 +403,10 @@ static int run_pgm(int fd, sandbox_init_req_t *req, int fdin[], int fdout[],
         int err = errno;
         DEBUG_MESSAGE("Error starting sandbox program: %s\n", strerror(err));
         ls_stderr("Error starting sandbox program: %s\n", strerror(err));
+        close(fdin[0]); close(fdin[1]);
+        close(fdout[0]); close(fdout[1]);
+        close(fderr[0]); close(fderr[1]);
+        fdin[0] = fdin[1] = fdout[0] = fdout[1] = fderr[0] = fderr[1] = -1;
         return -1;
     }
     s_listenPid = *pid;
@@ -328,8 +445,9 @@ static int read_sandbox_data(int fd, int fdin[], int fdout[], int fderr[],
     sandbox_data_t *sandbox_data = (sandbox_data_t *)buffer;
     int send_err = 0, pollcount;
     const char *err_loc;
-    int bytes = read(fds[i].fd, i == 0 ? buffer : data, 
-                     i == 0 ? (int)sizeof(sandbox_data_t) : buffersize);
+    int bytes = (i == 0) ? readall(fds[i].fd, buffer,
+                                   sizeof(sandbox_data_t), 0) :
+                           read(fds[i].fd, data, buffersize);
     int err = errno;
     DEBUG_MESSAGE("recv %d bytes from index: %d\n", bytes, i);
     if (i == 0)
@@ -341,8 +459,19 @@ static int read_sandbox_data(int fd, int fdin[], int fdout[], int fderr[],
             return -1;           
         }
         DEBUG_MESSAGE("Sandbox recv type: %d, len: %d\n", sandbox_data->m_sandbox_data_type, sandbox_data->m_datalen_rc);
+        if (sandbox_data->m_sandbox_data_type != SANDBOX_STDIN)
+        {
+            ls_stderr("Sandbox invalid input data type: %d\n",
+                      sandbox_data->m_sandbox_data_type);
+            return -1;
+        }
         bytes = sandbox_data->m_datalen_rc;
-        if (!sandbox_data->m_datalen_rc)
+        if (bytes < 0 || bytes > buffersize)
+        {
+            ls_stderr("Sandbox invalid input data length: %d\n", bytes);
+            return -1;
+        }
+        if (!bytes)
         {
             DEBUG_MESSAGE("STDIN is done\n");
             close(fdin[1]);
@@ -493,12 +622,25 @@ static int run_sandbox_pgm(int fd, sandbox_init_req_t *req, char *argv[], char *
 }
 
 
-static int sandbox_req(int fd)
+static int sandbox_req(int fd, uid_t peer_uid, gid_t peer_gid)
 {
     DEBUG_MESSAGE("sandbox_req\n");
     sandbox_init_req_t req;
     int rc = 0;
     if (readall(fd, (char *)&req, sizeof(req), 0) < 0)
+        return -1;
+    /* Override the client-supplied uid/gid with the kernel-verified peer
+     * credentials.  The wire-supplied values are NOT trusted: a hostile client
+     * inside any sandbox namespace can connect to the world-writable socket
+     * and request any uid (including 0) otherwise. */
+    if (req.m_uid != peer_uid || req.m_gid != peer_gid)
+    {
+        DEBUG_MESSAGE("Overriding wire uid/gid %d/%d with peer uid/gid %d/%d\n",
+                      req.m_uid, req.m_gid, peer_uid, peer_gid);
+    }
+    req.m_uid = peer_uid;
+    req.m_gid = peer_gid;
+    if (validate_init_req(&req))
         return -1;
     char *argv = malloc(req.m_argv_len + 1);
     char *env = malloc(req.m_env_len + 1);
@@ -525,23 +667,52 @@ static int sandbox_req(int fd)
 }
 
 
-static int sandbox_conn(int socket_in)
+static int sandbox_conn(int socket_in, uid_t peer_uid, gid_t peer_gid)
 {
     /* Normally close most things here, but I'm going to use much of them.*/
     ns_init_debug();
-    DEBUG_MESSAGE("sandbox_conn: pid: %d\n", getpid());
+    DEBUG_MESSAGE("sandbox_conn: pid: %d, peer uid: %d, peer gid: %d\n",
+                  getpid(), peer_uid, peer_gid);
     close(s_nosandbox_socket);
     s_nosandbox_socket = -1;
-    return sandbox_req(socket_in);
+    return sandbox_req(socket_in, peer_uid, peer_gid);
 }
 
 static int new_sandbox_conn(int socket_in)
 {
     pid_t pid;
+    struct ucred cr;
+    socklen_t crlen = sizeof(cr);
+
+    /* Authenticate the connecting process.  The listener runs as root and
+     * later calls setuid()/setgid() to the per-request identity, so a missing
+     * or spoofable identity here is a direct local-root path. */
+    if (getsockopt(socket_in, SOL_SOCKET, SO_PEERCRED, &cr, &crlen) != 0
+        || crlen != sizeof(cr))
+    {
+        int err = errno;
+        DEBUG_MESSAGE("SO_PEERCRED failed: %s\n", strerror(err));
+        ls_stderr("hostexec: cannot verify peer credentials: %s\n",
+                  strerror(err));
+        close(socket_in);
+        return -1;
+    }
+    DEBUG_MESSAGE("Peer creds pid: %d uid: %d gid: %d\n", cr.pid, cr.uid, cr.gid);
+    /* Refuse root and any uid/gid that would otherwise be privileged.
+     * Hostexec is for unprivileged sandboxed users only. */
+    if (cr.uid == 0 || cr.gid == 0)
+    {
+        DEBUG_MESSAGE("Refusing hostexec from privileged peer uid=%d gid=%d\n",
+                      cr.uid, cr.gid);
+        ls_stderr("hostexec: refusing connection from privileged peer "
+                  "(pid=%d uid=%d gid=%d)\n", cr.pid, cr.uid, cr.gid);
+        close(socket_in);
+        return -1;
+    }
 
     pid = fork();
     if (!pid)
-        exit(sandbox_conn(socket_in));
+        exit(sandbox_conn(socket_in, cr.uid, cr.gid));
     if (pid == -1)
     {
         ls_stderr("Error starting sandbox task: %s\n", strerror(errno));
@@ -667,7 +838,7 @@ static int open_nosandbox_socket()
         err = errno;
         DEBUG_MESSAGE("Can not initialize no sandbox socket: %s\n", strerror(err));
         ls_stderr("Can not initialize no sandbox socket: %s\n", strerror(err));
-        ns_done(0);
+        ns_done();
         return -1;
     }
     struct sockaddr_un loc;
@@ -677,14 +848,28 @@ static int open_nosandbox_socket()
              NOSANDBOX_FORMAT, ns_lsws_home(pathname, sizeof(pathname)), getpid());
     DEBUG_MESSAGE("Use socket: %s (%s)\n", loc.sun_path, strerror(errno));
     unlink(loc.sun_path);
-    if (bind(s_nosandbox_socket, (struct sockaddr *)&loc, 
+    if (bind(s_nosandbox_socket, (struct sockaddr *)&loc,
              strlen(loc.sun_path) + sizeof(loc.sun_family)) != 0)
     {
         err = errno;
         DEBUG_MESSAGE("Can not bind on %s: %s\n", loc.sun_path, strerror(err));
         ls_stderr("Can not bind on %s: %s\n", loc.sun_path, strerror(err));
+        ns_done(0);
+        return -1;
     }
     s_nosandbox_name = realpath(loc.sun_path, NULL);
+    if (!s_nosandbox_name)
+    {
+        err = errno;
+        DEBUG_MESSAGE("realpath(%s) failed: %s\n", loc.sun_path, strerror(err));
+        s_nosandbox_name = strdup(loc.sun_path);
+        if (!s_nosandbox_name)
+        {
+            ls_stderr("Out of memory resolving nosandbox socket name\n");
+            ns_done(0);
+            return -1;
+        }
+    }
     DEBUG_MESSAGE("Final socket name: %s\n", s_nosandbox_name);
     chmod(loc.sun_path, 0666);
     if (listen(s_nosandbox_socket, 5) != 0)
@@ -692,7 +877,7 @@ static int open_nosandbox_socket()
         int err = errno;
         DEBUG_MESSAGE("Can not listen on %s: %s\n", loc.sun_path, strerror(err));
         ls_stderr("Can not listen on %s: %s\n", loc.sun_path, strerror(err));
-        ns_done(0);
+        ns_done();
         return -1;
     }
     int pid = fork();
@@ -700,7 +885,7 @@ static int open_nosandbox_socket()
     {
         //strcpy(s_argv0, "lscgid (ns)");
         nosandbox_main();
-        ns_done(0);
+        ns_done();
         exit(0);
     }
     close(s_nosandbox_socket);
@@ -710,7 +895,7 @@ static int open_nosandbox_socket()
         err = errno;
         DEBUG_MESSAGE("Can not start listening process for %s: %s\n", loc.sun_path, strerror(err));
         ls_stderr("Can not start listening process for %s: %s\n", loc.sun_path, strerror(err));
-        ns_done(0);
+        ns_done();
         return -1;
     }
     if (write_nosandbox_socket_file())
@@ -728,14 +913,18 @@ static int save_links()
     if (s_nosandbox_count && nsnosandbox_symlink())
     {
         DEBUG_MESSAGE("save_links\n");
-        s_nosandbox_arr_link = malloc(sizeof(char *) * s_nosandbox_count);
+        s_nosandbox_arr_link = calloc(s_nosandbox_count, sizeof(char *));
+        size_t *link_offsets = malloc(sizeof(size_t) * s_nosandbox_count);
         int nosandbox_size = 0;
-        if (!s_nosandbox_arr_link)
+        if (!s_nosandbox_arr_link || !link_offsets)
         {
             ls_stderr("Insufficient memory for link array");
-            ns_done(0);
+            free(link_offsets);
+            ns_done();
             return -1;
         }
+        for (int i = 0; i < s_nosandbox_count; i++)
+            link_offsets[i] = (size_t)-1;
         for (int i = 0; i < s_nosandbox_count; i++)
         {
             char f[NOSANDBOX_MAX_FILE_LEN] = { 0 };
@@ -753,21 +942,38 @@ static int save_links()
             {
                 DEBUG_MESSAGE("%s realpath error: %s\n", s_nosandbox_arr[i], strerror(errno));
             }
-            else 
+            else
             {
                 DEBUG_MESSAGE("%s realpath %s\n", s_nosandbox_arr[i], f);
                 int lastpos = nosandbox_size;
-                nosandbox_size += (strlen(f) + 1);
-                s_nosandbox_link = realloc(s_nosandbox_link, nosandbox_size);
-                if (!s_nosandbox_link)
+                size_t f_len = strlen(f) + 1;
+                if (f_len > (size_t)(INT_MAX - nosandbox_size))
                 {
                     ls_stderr("Insufficient memory for links");
-                    ns_done(0);
+                    free(link_offsets);
+                    ns_done();
                     return -1;
                 }
-                strcpy(&s_nosandbox_link[lastpos], f);
+                nosandbox_size += (int)f_len;
+                char *new_link = realloc(s_nosandbox_link, nosandbox_size);
+                if (!new_link)
+                {
+                    ls_stderr("Insufficient memory for links");
+                    free(link_offsets);
+                    ns_done();
+                    return -1;
+                }
+                s_nosandbox_link = new_link;
+                memcpy(&s_nosandbox_link[lastpos], f, f_len);
+                link_offsets[i] = lastpos;
             }
         }
+        for (int i = 0; i < s_nosandbox_count; i++)
+        {
+            if (link_offsets[i] != (size_t)-1)
+                s_nosandbox_arr_link[i] = &s_nosandbox_link[link_offsets[i]];
+        }
+        free(link_offsets);
     }
     return 0;
 }
@@ -793,14 +999,14 @@ static int read_hostexec_files(char *filename, FILE *fh, int *no_sandbox_len)
         {
             ls_stderr("hostexec file (%s) contains invalid file: %s\n", filename, line);
             fclose(fh);
-            ns_done(0);
+            ns_done();
             return -1;
         }
         if (access(line, X_OK) != 0)
         {
             ls_stderr("hostexec file (%s) contains problem file: %s: %s\n", filename, line, strerror(errno));
             fclose(fh);
-            ns_done(0);
+            ns_done();
             return -1;
         }
         for (unsigned long i = 0; i < sizeof(s_bwrap_var) / sizeof(char *); i++)
@@ -808,17 +1014,22 @@ static int read_hostexec_files(char *filename, FILE *fh, int *no_sandbox_len)
             if (strstr(line, s_bwrap_var[i])) {
                 ls_stderr("hostexec file (%s) contains a file with a bubblewrap symbol: %s\n", filename, line);
                 fclose(fh);
-                ns_done(0);
+                ns_done();
                 return -1;
             }
         }
         int last_len = *no_sandbox_len;
         (*no_sandbox_len) += (line_len + 1);  // To allow the string to be updated later
-        s_nosandbox = realloc(s_nosandbox, *no_sandbox_len);
-        if (!s_nosandbox) {
-            ls_stderr("Insufficient memory creating hostexec table\n");
-            fclose(fh);
-            return -1;
+        {
+            char *new_nosandbox = realloc(s_nosandbox, *no_sandbox_len);
+            if (!new_nosandbox) {
+                ls_stderr("Insufficient memory creating hostexec table\n");
+                free(s_nosandbox);
+                s_nosandbox = NULL;
+                fclose(fh);
+                return -1;
+            }
+            s_nosandbox = new_nosandbox;
         }
         memcpy(&s_nosandbox[last_len], line, line_len + 1);
         s_nosandbox_count++;
@@ -915,7 +1126,15 @@ int nsnosandbox_init()
                 return -1;
             int last_len = no_sandbox_len;
             no_sandbox_len += (s_nosandbox_count * sizeof(char *));
-            s_nosandbox = realloc(s_nosandbox, no_sandbox_len);
+            char *new_nosandbox = realloc(s_nosandbox, no_sandbox_len);
+            if (!new_nosandbox)
+            {
+                ls_stderr("Namespace insufficient memory growing hostexec list\n");
+                free(s_nosandbox);
+                s_nosandbox = NULL;
+                return -1;
+            }
+            s_nosandbox = new_nosandbox;
             s_nosandbox_arr = (char **)&s_nosandbox[last_len];
             int pos = 0;
             for (int i = 0; i < s_nosandbox_count; i++)
@@ -965,6 +1184,10 @@ void nsnosandbox_done()
     }
     free(s_nosandbox_name);
     s_nosandbox_name = NULL;
+    free(s_nosandbox_link);
+    s_nosandbox_link = NULL;
+    free(s_nosandbox_arr_link);
+    s_nosandbox_arr_link = NULL;
 }
 
 
@@ -973,3 +1196,4 @@ int nsnosandbox_symlink()
     return s_nosandbox_force_symlink || (s_ns_osmajor < 5 || (s_ns_osmajor == 5 && s_ns_osminor < 12));
 }
 
+#endif // Linux

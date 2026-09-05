@@ -21,6 +21,8 @@
 #include <http/httplog.h>
 #include <http/httpserverconfig.h>
 #include <http/serverprocessconfig.h>
+#include <http/useacme.h>
+#include <http/httpvhost.h>
 #include <log4cxx/level.h>
 #include <log4cxx/logger.h>
 #include <lsr/ls_fileio.h>
@@ -251,6 +253,7 @@ int ConfigCtx::expandVariable(const char *pValue, char *pBuf,
         {
             const char *pName = NULL;
             int nameLen = -1;
+            int isRootVar = 0;
 
             if (strncasecmp(pBegin + 1, VH_NAME, 7) == 0)
             {
@@ -268,16 +271,19 @@ int ConfigCtx::expandVariable(const char *pValue, char *pBuf,
             {
                 pBegin += 8;
                 pName = s_aVhRoot;
+                isRootVar = 1;
             }
             else if (allVariable && strncasecmp(pBegin + 1, DOC_ROOT, 8) == 0)
             {
                 pBegin += 9;
                 pName = s_aDocRoot;
+                isRootVar = 1;
             }
             else if (allVariable && strncasecmp(pBegin + 1, SERVER_ROOT, 11) == 0)
             {
                 pBegin += 12;
                 pName = MainServerConfig::getInstance().getServerRoot();
+                isRootVar = 1;
             }
             else
             {
@@ -300,6 +306,9 @@ int ConfigCtx::expandVariable(const char *pValue, char *pBuf,
                 memmove(pCur, pName, nameLen);
                 pCur += nameLen;
             }
+
+            if (isRootVar && *pBegin == '/')
+                ++pBegin;
         }
     }
 
@@ -763,8 +772,8 @@ void ConfigCtx::configCRL(const XmlNode *pNode, SslContext *pSsl)
 }
 
 
-SslContext *ConfigCtx::newSSLContext(const XmlNode *pNode,
-                                    const char *pName, SslContext *pOldContext)
+SslContext *ConfigCtx::justSSLContext(const XmlNode *pNode, const char *pName,
+                                      SslContext *pOldContext, UseAcme *useAcme)
 {
     SslContextConfig config;
     int cv;
@@ -774,16 +783,20 @@ SslContext *ConfigCtx::newSSLContext(const XmlNode *pNode,
          achCAPath[MAX_PATH_LEN], achCAFile[MAX_PATH_LEN],
          achDHParam[MAX_PATH_LEN];
 
-    if (pNode->getChild("certFile") == NULL)
+    if (useAcme)
     {
-        LS_NOTICE( "[%s] No SSL certificate configured for [%s]",
-                  getLogId(), pName);
-        return NULL;
+        pCertFile = useAcme->getCert();
+        LS_DBG("UseAcme cert file: %s, domain: %s, vhost: %s\n", 
+               pCertFile, useAcme->getDomain(), useAcme->getVhost());
+        pKey = useAcme->getKey();
     }
-    if ((pCertFile = getTag(pNode, "certFile")) == NULL)
-        return NULL;
-    else if ((pKey = getTag(pNode, "keyFile")) == NULL)
-        return NULL;
+    else
+    {
+        if ((pCertFile = getTag(pNode, "certFile")) == NULL)
+            return NULL;
+        else if ((pKey = getTag(pNode, "keyFile")) == NULL)
+            return NULL;
+    }
 
     config.m_iEnableMultiCerts =
                     HttpServerConfig::getInstance().getEnableMultiCerts();
@@ -805,19 +818,23 @@ SslContext *ConfigCtx::newSSLContext(const XmlNode *pNode,
     config.m_sKeyFile[0] = achKey;
     config.m_sName = pName;
 
-    const char *pCipher = pNode->getChildValue( "ciphers" );
+    const char *pCipher = NULL;
+    if (pNode)
+        pCipher = pNode->getChildValue( "ciphers" );
     if (pCipher == NULL)
         pCipher = "ALL:!ADH:!EXPORT56:RC4+RSA:+HIGH:+MEDIUM:+SSLv2:+EXP";
     config.m_sCiphers = pCipher;
 
-    if (( pTag = pNode->getChildValue( "CACertPath" )) != NULL )
+    if (/*(useAcme && (pTag = useAcme->getCertPath()) != NULL) ||*/
+        (!useAcme && ( pTag = pNode->getChildValue( "CACertPath" )) != NULL ))
     {
         if ( getValidFile(achCAPath, pTag, "CA Certificate path" ) != 0 )
             return NULL;
         config.m_sCAPath = achCAPath;
     }
 
-    if (( pTag = pNode->getChildValue( "CACertFile" )) != NULL )
+    if (/*(useAcme && (pTag = useAcme->getCertPath()) != NULL) ||*/
+        (!useAcme && ( pTag = pNode->getChildValue( "CACertFile" )) != NULL ))
     {
         if ( getValidFile(achCAFile, pTag, "CA Certificate file" ) != 0 )
             return NULL;
@@ -825,17 +842,29 @@ SslContext *ConfigCtx::newSSLContext(const XmlNode *pNode,
     }
 
 
-    cv = getLongValue( pNode, "clientVerify", 0, 3, 0 );
+    if (pNode)
+        cv = getLongValue( pNode, "clientVerify", 0, 3, 0 );
+    else 
+        cv = 0;
     config.m_iClientVerify = cv;
     if (cv)
         config.m_iVerifyDepth = getLongValue(pNode, "verifyDepth", 1, INT_MAX, 1);
 
-    config.m_iCertChain = getLongValue( pNode, "certChain", 0, 1, 0 );
-    config.m_iProtocol = getLongValue(pNode, "sslProtocol", 1, 31,
-                                      SslContext::SSL_TLS_SAFE);
-    config.m_iEnableECDHE = getLongValue(pNode, "enableECDHE", 0, 1, 1);
-    config.m_iEnableDHE = getLongValue(pNode, "enableDHE", 0, 1, 0);
-
+    if (pNode)
+    {
+        config.m_iCertChain = getLongValue( pNode, "certChain", 0, 1, 0 );
+        config.m_iProtocol = getLongValue(pNode, "sslProtocol", 1, 31,
+                                          SslContext::SSL_TLS_SAFE);
+        config.m_iEnableECDHE = getLongValue(pNode, "enableECDHE", 0, 1, 1);
+        config.m_iEnableDHE = getLongValue(pNode, "enableDHE", 0, 1, 0);
+    }
+    else 
+    {
+        config.m_iCertChain = 0;
+        config.m_iProtocol = SslContext::SSL_TLS_SAFE;
+        config.m_iEnableECDHE = 1;
+        config.m_iEnableDHE = 0;
+    }
     if ( config.m_iEnableDHE != 0 )
     {
         if (( pTag = pNode->getChildValue("DHParam")) != NULL )
@@ -851,15 +880,26 @@ SslContext *ConfigCtx::newSSLContext(const XmlNode *pNode,
         }
     }
 
-    config.m_iEnableSpdy = getLongValue(pNode, "enableSpdy", 0, 15, 12);
-    config.m_iEnableCache = getLongValue(pNode, "sslSessionCache", 0, 1, 0);
-    config.m_iInsecReneg = !getLongValue(pNode, "regenProtection", 0, 1, 1);
-    config.m_iEnableTicket = getLongValue(pNode, "sslSessionTickets",
+    if (pNode)
+    {
+        config.m_iEnableSpdy = getLongValue(pNode, "enableSpdy", 0, 15, 12);
+        config.m_iEnableCache = getLongValue(pNode, "sslSessionCache", 0, 1, 0);
+        config.m_iInsecReneg = !getLongValue(pNode, "regenProtection", 0, 1, 1);
+        config.m_iEnableTicket = getLongValue(pNode, "sslSessionTickets",
                                                0, 1, 1);
-    int enableStapling = getLongValue(pNode, "enableStapling", 0, 1, 0);
-    if ((enableStapling) && (pCertFile != NULL))
-        if (configStapling(pNode, &config) != -1)
-            config.m_iEnableStapling = enableStapling;
+        int enableStapling = getLongValue(pNode, "enableStapling", 0, 1, 0);
+        if ((enableStapling) && (pCertFile != NULL))
+            if (configStapling(pNode, &config) != -1)
+                config.m_iEnableStapling = enableStapling;
+    }
+    else 
+    {
+        config.m_iEnableSpdy = 12;
+        config.m_iEnableCache = 0;
+        config.m_iInsecReneg = !1;
+        config.m_iEnableTicket = 1;
+        config.m_iEnableStapling = 0;
+    }
 
     pSsl = SslContext::config(pOldContext, &config);
     if ( pSsl == NULL )
@@ -874,7 +914,58 @@ SslContext *ConfigCtx::newSSLContext(const XmlNode *pNode,
         configCRL(pNode, pSsl);
     }
 
+    if (useAcme)
+    {
+        LS_NOTICE( "[%s] Using ACME generated SSL certificate configured for [%s]",
+                  getLogId(), pName);
+        useAcme->setSslContext(pSsl);
+    }
     return pSsl;
+
+}
+
+
+SslContext *ConfigCtx::newSSLContext(const XmlNode *pNode, const char *pName, 
+                                     SslContext *pOldContext, HttpVHost *vhost)
+{
+    UseAcme *useAcme = NULL;
+    const XmlNode *hasFile = NULL;
+    SslContext *pSslAcme = NULL, *pSslFile = NULL;
+    hasFile = pNode->getChild("certFile");
+    if (hasFile)
+        pSslFile = justSSLContext(pNode, pName, pOldContext, NULL);
+    // Discover ACME-managed domains when there is no file certificate (the
+    // normal ACME path), and also when AutoCert is globally ON even though a
+    // file certificate is present.  The latter lets vhosts that specify no
+    // certificate files of their own still get automatically generated certs:
+    // acmeFound() populates the per-vhost ACME maps consumed later by
+    // UseAcme::vhostActivate().  The manually specified certificate is left in
+    // place and is never overridden.
+    if (HttpServerConfig::getInstance().getAcme() != HttpServerConfig::ACME_DISABLED &&
+        (!pSslFile ||
+         HttpServerConfig::getInstance().getAcme() == HttpServerConfig::ACME_ON))
+        useAcme = UseAcme::acmeFound(pNode, pName);
+    if (useAcme)
+        pSslAcme = justSSLContext(pNode, pName, pOldContext, useAcme);
+    if (!pSslFile && !pSslAcme)
+    {
+        LS_NOTICE( "[%s] No SSL certificate configured for [%s]",
+                  getLogId(), pName);
+        const char *pMap = getTag(pNode, "map", 0, 0);
+        if (!pMap)
+            return NULL;
+    }
+    // A manually specified certificate is never overridden by an ACME one.
+    // When both exist, the file cert is used as this node's context while the
+    // ACME context generated above stays attached to its vhost via the ACME
+    // maps (so per-vhost auto certs still apply through SNI).
+    if (pSslFile)
+    {
+        if (vhost)
+            vhost->setFileSsl(1);
+        return pSslFile;
+    }
+    return pSslAcme;
 }
 
 

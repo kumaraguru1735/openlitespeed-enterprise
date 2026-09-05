@@ -19,12 +19,9 @@ enum stream_state
 enum stream_protocol
 {
     HIOS_PROTO_HTTP  = 0,
-    HIOS_PROTO_SPDY2 = 1,
-    HIOS_PROTO_SPDY3 = 2,
-    HIOS_PROTO_SPDY31 = 3,
-    HIOS_PROTO_HTTP2 = 4,
-    HIOS_PROTO_QUIC = 5,
-    HIOS_PROTO_HTTP3 = 6,
+    HIOS_PROTO_HTTP2 = 1,
+    HIOS_PROTO_QUIC  = 2,
+    HIOS_PROTO_HTTP3 = 3,
     HIOS_PROTO_MAX,
     SS_PROTO_L4,
     SS_PROTO_L4SSL,
@@ -54,7 +51,7 @@ enum stream_flag
     SS_FLAG_FLOWCTRL           = (1<<18),
     SS_FLAG_PRI_SET            = (1<<19),
     SS_FLAG_ALTSVC_SENT        = (1<<20),
-    SS_FLAG_PASS_SETCOOKIE     = (1<<21),
+    SS_FLAG_DROP               = (1<<21),
     SS_FLAG_RESP_HEADER_SENT   = (1<<22),
     SS_FLAG_BLACK_HOLE         = (1<<23),
     SS_FLAG_READ_EOS           = (1<<24),
@@ -81,7 +78,8 @@ public:
     void reset()
     {   LS_ZERO_FILL(m_lBytesRecv, m_iPriority); }
 
-
+    void setFlag(enum stream_flag flagbit)
+    {   m_iFlag = (enum stream_flag)(m_iFlag | flagbit);    }
     void setFlag(enum stream_flag flagbit, int val)
     {   m_iFlag = (val) ? (enum stream_flag)(m_iFlag | flagbit)
                         : (enum stream_flag)(m_iFlag & ~flagbit);       }
