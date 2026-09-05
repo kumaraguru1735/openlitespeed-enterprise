@@ -1292,9 +1292,9 @@ int HttpContext::addEnvIfRule(const char *pAttr, int attrLen,
     pRule->m_iNoCase = noCase;
     pRule->m_pNext = NULL;
 
-    int options = REG_EXTENDED;
+    int options = LSRE_DEFAULT;
     if (noCase)
-        options |= REG_ICASE;
+        options |= LSRE_CASELESS;
     pRule->m_pRegex = Pcregex::get(pPattern, options);
     if (!pRule->m_pRegex)
     {

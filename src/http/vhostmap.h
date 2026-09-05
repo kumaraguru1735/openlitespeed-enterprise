@@ -88,10 +88,12 @@ public:
             if (pMatch && pMatch != m_pCatchAll)
                 return pMatch;
         }
-        // Try JIT loading if enabled and no exact/wild match found
+        // Try JIT loading if enabled and no exact/wild match found.
+        // jitLoadVHost() caches the loaded vhost into this map, so it is
+        // non-const; the lookup itself is logically const.
         if (m_pJitVHostMap)
         {
-            HttpVHost *pJit = jitLoadVHost(pHost);
+            HttpVHost *pJit = const_cast<VHostMap *>(this)->jitLoadVHost(pHost);
             if (pJit)
                 return pJit;
         }
